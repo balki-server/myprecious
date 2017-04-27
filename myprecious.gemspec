@@ -1,7 +1,7 @@
 Gem::Specification.new do |s|
   s.name        = 'myprecious'
-  s.version     = '0.0.3'
-  s.date        = '2017-04-24'
+  s.version     = '0.0.4'
+  s.date        = '2017-04-26'
   s.summary     = "Your precious dependencies!"
   s.description = "A simple, markdown generated with information about your gems"
   s.authors     = ["Balki Kodarapu"]
