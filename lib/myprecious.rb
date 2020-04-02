@@ -1,121 +1,234 @@
-require 'gems'
 require 'date'
 require 'git'
+require 'myprecious/ruby_gems'
+require 'ostruct'
+require 'pathname'
+require 'rake/toolkit_program'
 
-class MyPrecious
-  def self.update
-    g = Git.open(Dir.pwd)
-    repo_name = g.repo.path.split(".git")[0].split("/").last
-    repo_name = repo_name + "-dependency-tracking"
-    gem_lines = {}
-    gem_name_pos = 0
-    gem_version_pos = 1
-    gem_latest_pos = 2
-    gem_date_pos = 3
-    gem_age_pos = 4
-    gem_license_pos = 5
-    gem_change_pos = 6
-    default_length = 7
-    already_fetched_gems = {}
-    if File.file?(repo_name+'.md')
-      File.open(repo_name+".md", "r").each_with_index do |line, line_number|
-        #puts line + " dds " + line_number.to_s
-        word_array = line.split('|')
-        if line_number == 1
-          default_length = word_array.size
-          word_array.each_with_index do |word, index|
-            if word.strip == 'Gem'
-              gem_name_pos = index
-            elsif word.strip == 'Our Version'
-              gem_version_pos = index
-            elsif word.strip == 'Latest Version'
-              gem_latest_pos = index
-            elsif word.strip == 'Date available'
-              gem_date_pos = index
-            elsif word.strip == 'Age (in days)'
-              gem_age_pos = index
-            elsif word.strip == 'License Type'
-              gem_change_pos = index
-            elsif word.strip == 'Change Log'
-              gem_change_pos = index
-            end
-          end
-        elsif line_number > 2
-          gem_name_index = word_array[gem_name_pos].strip
-          #extract just the name of the gem from the first column
-          #since that column contains a markdown-formatted hyperlink
-          gem_name_index = gem_name_index[/\[(.*?)\]/,1]
-          gem_lines[gem_name_index] = line_number
-        end
-
+module MyPrecious
+  extend Rake::DSL
+  
+  Program = Rake::ToolkitProgram
+  Program.title = "myprecious Dependecy Reporting Tool"
+  
+  class << self
+    attr_accessor :caching_disabled
+  end
+  
+  Program.command_tasks do
+    desc "Generate report on Ruby gems"
+    task('ruby-gems').parse_args(into: OpenStruct.new) do |parser, args|
+      parser.expect_positional_cardinality(0)
+      
+      parser.on(
+        '-o', '--out FILE',
+        "Output file to generate",
+      ) {|fpath| args.output_file = Pathname(fpath)}
+      
+      args.target = Pathname.pwd
+      parser.on(
+        '-C', '--dir PATH',
+        "Path to inspect",
+      ) do |fpath|
+        fpath = Pathname(fpath)
+        parser.invalid_args!("#{fpath} does not exist.") unless fpath.exist?
+        args.target = fpath
       end
-      #puts gem_lines
-    else
-      File.open(repo_name+'.md', 'w') { |write_file|
-        write_file.puts "Last updated:" + Date.today.to_s + "; Use for directional purposes only, this data is not real time and might be slightly inaccurate" + "\n\n"
-        write_file.puts "Gem | Our Version | Latest Version | Date available | Age (in days) | License Type | Change Log"
-        write_file.puts "--- | --- | --- | --- | --- | --- | ---"
-      }
+      
+      parser.on(
+        '--[no-]cache',
+        "Control caching of gem information"
+      ) {|v| MyPrecious.caching_disabled = v}
     end
-
-    file = File.new("Gemfile", "r")
-
-    final_write = File.readlines(repo_name+'.md')
-
-    while (line = file.gets)
-      gem_line = line.strip
-      if (gem_line.include? 'gem') && !gem_line.start_with?('#') && !gem_line.start_with?('source')
-        name = gem_line.split(' ')[1].split(',')[0].tr(" '\"", "")
-        begin
-          puts name + " is being fetched, and processed"
-          gems_latest_info = Gems.info name
-          current_version = Gem::Specification.find_all_by_name(name).max ? Gem::Specification.find_all_by_name(name).max.version : gems_latest_info["version"]
-
-         gems_info = Gems.versions name
-          latest_build = ''
-          gems_info.each do |gem_info|
-            if gem_info["number"].to_s == gems_latest_info["version"].to_s
-              latest_build = Date.parse gem_info["built_at"]
-            end
-            if gem_info["number"].to_s == current_version.to_s && !already_fetched_gems[name]
-              already_fetched_gems[name] = true
-              current_build = Date.parse gem_info["built_at"]
-
-              days_complete = latest_build - current_build
-              #puts name
-              #puts gem_lines
-              if gem_lines[name].nil?
-                array_to_write = Array.new(default_length) { |i| "" }
-              else
-                array_to_write = final_write[gem_lines[name]].split('|')
-              end
-              array_to_write[gem_name_pos] = "[" + name + "]" + "(" + gems_latest_info["homepage_uri"].to_s  + ")"
-              array_to_write[gem_version_pos] = current_version.to_s
-              array_to_write[gem_latest_pos] = gems_latest_info["version"].to_s
-              array_to_write[gem_date_pos] = (latest_build).to_s
-              array_to_write[gem_age_pos] = days_complete.to_i.to_s
-              if !gem_info["licenses"].nil?
-                array_to_write[gem_license_pos] = gem_info["licenses"][0]
-              else
-                array_to_write[gem_license_pos] = "N/A"
-              end
-              array_to_write[gem_change_pos] = gems_latest_info["changelog_uri"].to_s + "\n"
-              if !gem_lines[name].nil?
-                final_write[gem_lines[name]] = array_to_write.join("|")
-              else
-                final_write << array_to_write.join("|")
-              end
-            end
-          end
-        rescue Exception => e
-          puts e
-          puts name
+    task 'ruby-gems' do
+      args = Program.args
+      out_fpath = args.output_file || Reporting.default_output_fpath(args.target)
+      
+      col_order = Reporting.read_column_order_from(out_fpath)
+      
+      # Get all gems used via RubyGemInfo.each_gem_used, accumulating version requirements
+      gems = RubyGemInfo.accum_gem_lock_info(args.target)
+      
+      out_fpath.open('w') do |outf|
+        # Header
+        outf.puts "Last updated: #{Time.now.rfc2822}; Use for directional purposes only, this data is not real time and might be slightly inaccurate"
+        outf.puts
+        
+        Reporting.header_lines(
+          col_order,
+          RubyGemInfo.method(:col_title)
+        ).each {|l| outf.puts l}
+        
+        # Iterate all gems in name order, pulling column values from the RubyGemInfo objects
+        gems.keys.sort_by {|n| n.downcase}.map {|name| gems[name]}.each do |gem|
+          outf.puts(col_order.map do |attr|
+            MarkdownAdapter.new(gem).send(attr)
+          end.join(" | "))
         end
       end
+        
     end
-    File.open(repo_name+'.md', 'w') { |f| f.write(final_write.join) }
-    file.close
+  end
+  
+  class GitInfoExtractor
+    URL_PATTERN = /\/([^\/]+)\.git$/
+    
+    def initialize(dir)
+      super()
+      @dir = dir
+    end
+    attr_reader :dir
+    
+    def git_info
+      @git_info ||= Git.open(self.dir)
+    end
+    
+    def origin_remote
+      git_info.remotes.find {|r| r.name == 'origin'}
+    end
+    
+    def repo_name
+      @repo_name ||= (URL_PATTERN =~ origin_remote.url) && $1
+    end
+  end
+  
+  module Reporting
+    def default_output_fpath(dir)
+      dir / (GitInfoExtractor.new(dir).repo_name + "-dependency-tracking.md")
+    end
+    module_function :default_output_fpath
+    
+    def read_column_order_from(fpath)
+      result = ColumnOrder.new
+      begin
+        prev_line = nil
+        fpath.open {|inf| inf.each_line do |line|
+          if prev_line && /^-+(?:\|-+)*$/ =~ line.gsub(' ', '')
+            result.read_order_from_headers(prev_line)
+            break
+          end
+          prev_line = line
+        end}
+      rescue Errno::ENOENT
+        # No problem
+      end
+      return result
+    end
+    module_function :read_column_order_from
+    
+    def header_lines(order, titlizer)
+      col_titles = order.map {|c| titlizer.call(c)}
+      return [
+        col_titles.join(" | "),
+        (["---"] * col_titles.length).join(" | "),
+      ]
+    end
+    module_function :header_lines
+    # TODO: Mark dependencies with colors a la https://stackoverflow.com/a/41247934
+    
+    def common_col_title(attr)
+      case attr
+      when :current_version then 'Our Version'
+      when :age then 'Age (in days)'
+      when :latest_version then 'Latest Version'
+      when :latest_released then 'Date Available'
+      when :recommended_version then 'Recommended Version'
+      when :license then 'License Type'
+      when :changelog then 'Change Log'
+      else
+        warn("'#{attr}' column does not have a mapped name")
+        attr
+      end
+    end
+    module_function :common_col_title
+  end
+  
+  class ColumnOrder
+    DEFAULT = %i[name current_version age latest_version latest_released recommended_version license changelog].freeze
+    COLUMN_FROM_TEXT_NAME = {
+      'gem' => :name,
+      'package' => :name,
+      'module' => :name,
+      'our version' => :current_version,
+      'latest version' => :latest_version,
+      'date available' => :latest_released,
+      'age (in days)' => :age,
+      'license type' => :license,
+      /change ?log/ => :changelog,
+      'recommended version' => :recommended_version,
+    }
+    
+    def initialize
+      super
+      @order = DEFAULT
+    end
+    
+    def [](n)
+      @order[n]
+    end
+    
+    def length
+      @order.length
+    end
+    
+    def each(&blk)
+      @order.each(&blk)
+    end
+    include Enumerable
+    
+    def read_order_from_headers(headers_line)
+      headers = headers_line.split('|').map {|h| h.strip.squeeze(' ')}
+      @order = headers.map {|h| self.class.col_from_text_name(h)}.compact
+      
+      # Add in any missing columns at the end
+      @order.concat(DEFAULT - @order)
+      
+      return @order.dup
+    end
+    
+    def self.col_from_text_name(n)
+      n = n.downcase
+      entry = COLUMN_FROM_TEXT_NAME.find {|k, v| k === n}
+      return entry && entry[1]
+    end
+  end
+  
+  class MarkdownAdapter
+    def initialize(dep)
+      super()
+      @dependency = dep
+    end
+    attr_reader :dependency
+    
+    def name
+      "[#{dependency.name}](#{dependency.homepage_uri})"
+    rescue StandardError
+      dependency.name
+    end
+    
+    def changelog
+      base_val = begin
+        dependency.changelog
+      rescue StandardError
+        return "(error)"
+      end
+      
+      begin
+        uri = URI.parse(base_val)
+        if ['http', 'https'].include?(uri.scheme)
+          return "[on #{uri.hostname}](#{base_val})"
+        end
+      rescue StandardError
+      end
+      return base_val
+    end
+    
+    def method_missing(name)
+      dependency.send(name)
+    rescue NoMethodError
+      raise
+    rescue StandardError
+      "(error)"
+    end
   end
 end
-
-MyPrecious.update

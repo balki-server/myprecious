@@ -1,4 +1,9 @@
 #!/usr/bin/env ruby
 
+require 'rubygems'
+require 'bundler/setup'
 require 'myprecious'
-puts MyPrecious.update
+
+MyPrecious::Program.run(
+  on_error: (:exit_program! if ENV['TRACE_ERRORS'].to_s.empty?)
+)

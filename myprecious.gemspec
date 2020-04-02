@@ -10,6 +10,12 @@ Gem::Specification.new do |s|
   s.executables << 'myprecious'
   s.add_runtime_dependency 'gems', '~> 1.0', '>= 1.0.0'
   s.add_runtime_dependency 'git', '~> 1.5', '>= 1.5.0'
+  s.add_runtime_dependency 'rake-toolkit_program'
+  
+  s.add_development_dependency "bundler", "~> 1.13"
+  s.add_development_dependency "pry", "~> 0.13"
+  s.add_development_dependency "rb-readline", "~> 0.5"
+  
   s.homepage    =
     'http://rubygems.org/gems/myprecious'
   s.license       = 'MIT'
