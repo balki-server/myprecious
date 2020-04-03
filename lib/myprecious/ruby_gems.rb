@@ -1,4 +1,5 @@
 require 'gems'
+require 'myprecious/data_caches'
 require 'pathname'
 
 module MyPrecious
@@ -7,11 +8,31 @@ module MyPrecious
     MIN_STABLE_DAYS = 14
     
     DATA_DIR = Pathname('~/.local/lib/myprecious').expand_path
-    INFO_CACHE_DIR = DATA_DIR / 'rb-info-cache'
-    VERSIONS_CACHE_DIR = DATA_DIR / 'rb-versions-cache'
+    INFO_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / 'rb-info-cache')
+    VERSIONS_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / 'rb-versions-cache')
     
     ONE_DAY = 60 * 60 * 24
+    SOURCE_CODE_URI_ENTRIES = %w[github_repo source_code_uri]
     
+    ##
+    # Enumerate Ruby gems used in a project
+    #
+    # The project at +fpath+ must have a "Gemfile.lock" file as used by the
+    # +bundler+ gem.
+    #
+    # The block receives an Array with three values:
+    # - Either +:current+ or +:reqs+, indicating the meaning of the element at
+    #   index 2,
+    # - The name of the gem, and
+    # - Either a Gem::Version (if the index-0 element is :current) or a
+    #   Gem::Requirement (if the index-0 element is :reqs)
+    #
+    # Iterations yielding +:current+ given the version of the gem currently
+    # specified by the Gemfile.lock in the project.  Iterations yielding
+    # +:reqs+ give requirements on the specified gem dictated by other gems
+    # used by the project.  Each gem name will appear in only one +:current+
+    # iteration, but may occur in multiple +:reqs+ iterations.
+    # 
     def self.each_gem_used(fpath)
       return enum_for(:each_gem_used, fpath) unless block_given?
       
@@ -33,6 +54,16 @@ module MyPrecious
       end
     end
     
+    ##
+    # Build a Hash mapping names of gems used by a project to RubyGemInfo about them
+    #
+    # The project at +fpath+ must have a "Gemfile.lock" file as used by the
+    # +bundler+ gem.
+    #
+    # The accumulated RubyGemInfo instances should have non-+nil+
+    # #current_version values and meaningful information in #version_reqs,
+    # as indicated in the Gemfile.lock for +fpath+.
+    #
     def self.accum_gem_lock_info(fpath)
       {}.tap do |gems|
         each_gem_used(fpath) do |entry_type, name, verreq|
@@ -48,6 +79,9 @@ module MyPrecious
       end
     end
     
+    ##
+    # Get an appropriate, human friendly column title for an attribute
+    #
     def self.col_title(attr)
       case attr
       when :name then 'Gem'
@@ -59,13 +93,17 @@ module MyPrecious
       end
     end
     
-    def initialize(name, our_version: nil)
+    def initialize(name)
       super()
       @name = name
       @version_reqs = Gem::Requirement.new
     end
     attr_reader :name, :version_reqs
     attr_accessor :current_version
+    
+    def inspect
+      %Q{#<#{self.class.name}:#{'%#.8x' % (object_id << 1)} "#{name}">}
+    end
     
     def homepage_uri
       get_gems_info['homepage_uri']
@@ -205,16 +243,13 @@ module MyPrecious
       
       days_between = days_between_current_and_recommended
       
-      return case 
-      when days_between < 200
-        at_least_moderate ? :moderate : nil
-      when days_between < 500
-        at_least_moderate ? :moderate : :mild
-      when days_between < 750
-        :moderate
-      else
-        :severe
-      end
+      return Reporting.obsolescence_by_age(days_between, at_least_moderate: at_least_moderate)
+    end
+    
+    def source_code_uri
+      metadata = get_gems_info['metadata']
+      SOURCE_CODE_URI_ENTRIES.each {|k| return metadata[k] if metadata[k]}
+      return nil
     end
     
     private
@@ -228,6 +263,15 @@ module MyPrecious
         apply_cache(cache) {Gems.versions(name)}
       end
       
+      ##
+      # Use cached data in or write data to a file cache
+      #
+      # +cache+ should be a Pathname to a file in which JSON data or can
+      # be cached.
+      #
+      # The block given will only be invoked if the cache does not exist or
+      # is stale.  The block must return JSON.dump -able data.
+      #
       def apply_cache(cache, &get_data)
         if !MyPrecious.caching_disabled && cache.exist? && cache.stat.mtime > Time.now - ONE_DAY
           return cache.open('r') {|inf| JSON.load(inf)}
