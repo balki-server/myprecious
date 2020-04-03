@@ -135,6 +135,7 @@ module MyPrecious
       when :recommended_version then 'Recommended Version'
       when :license then 'License Type'
       when :changelog then 'Change Log'
+      when :obsolescence then 'How Bad'
       else
         warn("'#{attr}' column does not have a mapped name")
         attr
@@ -150,6 +151,7 @@ module MyPrecious
       'package' => :name,
       'module' => :name,
       'our version' => :current_version,
+      'how bad' => :obsolescence,
       'latest version' => :latest_version,
       'date available' => :latest_released,
       'age (in days)' => :age,
@@ -193,6 +195,10 @@ module MyPrecious
     end
   end
   
+  class LicenseDescription < String
+    attr_accessor :update_info
+  end
+  
   class MarkdownAdapter
     def initialize(dep)
       super()
@@ -201,9 +207,35 @@ module MyPrecious
     attr_reader :dependency
     
     def name
-      "[#{dependency.name}](#{dependency.homepage_uri})"
+      cswatch = begin
+        color_swatch + ' '
+      rescue StandardError
+        ''
+      end
+      "#{cswatch}[#{dependency.name}](#{dependency.homepage_uri})"
     rescue StandardError
       dependency.name
+    end
+    
+    def recommended_version
+      if dependency.current_version < dependency.recommended_version
+        "**#{dependency.recommended_version}** -- #{dependency.days_between_current_and_recommended} days newer"
+      else
+        dependency.recommended_version
+      end
+    rescue StandardError
+      "(error)"
+    end
+    
+    def license
+      value = dependency.license
+      if value.update_info
+        "#{value}<br/>(#{value.update_info})"
+      else
+        value
+      end
+    rescue StandardError
+      "(error)"
     end
     
     def changelog
@@ -221,6 +253,26 @@ module MyPrecious
       rescue StandardError
       end
       return base_val
+    end
+    
+    def obsolescence
+      color_swatch
+    rescue StandardError
+      ''
+    end
+    
+    def color
+      case dependency.obsolescence
+      when :mild then "dde418"
+      when :moderate then "f9b733"
+      when :severe then "fb0e0e"
+      else "4dda1b"
+      end
+    end
+    
+    # Mark dependencies with colors a la https://stackoverflow.com/a/41247934
+    def color_swatch
+      "![##{color}](https://placehold.it/15/#{color}/000000?text=+)"
     end
     
     def method_missing(name)

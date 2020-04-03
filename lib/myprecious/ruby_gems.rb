@@ -92,13 +92,15 @@ module MyPrecious
     #
     def recommended_version
       return nil if versions_with_release.empty?
+      return @recommended_version if defined? @recommended_version
+      
       orig_time_horizon = time_horizon = \
         Time.now - (MIN_RELEASED_DAYS * ONE_DAY)
       horizon_versegs = nonpatch_versegs(versions_with_release[0][0])
       
       versions_with_release.each do |ver, released|
         next if ver.prerelease?
-        return current_version if current_version && current_version >= ver
+        return (@recommended_version = current_version) if current_version && current_version >= ver
         
         # Reset the time-horizon clock if moving back into previous patch-series
         if (nonpatch_versegs(ver) <=> horizon_versegs) < 0
@@ -106,11 +108,11 @@ module MyPrecious
         end
         
         if released < time_horizon && version_reqs.satisfied_by?(ver)
-          return ver
+          return (@recommended_version = ver)
         end
         time_horizon = [time_horizon, released - (MIN_STABLE_DAYS * ONE_DAY)].min
       end
-      return nil
+      return (@recommended_version = nil)
     end
     
     def latest_version
@@ -145,15 +147,24 @@ module MyPrecious
       
       case 
       when now_included.empty? && now_excluded.empty?
-        current_licenses.join(' or ')
+        LicenseDescription.new(current_licenses.join(' or '))
       when !now_excluded.empty?
-        "#{current_licenses.join(' or ')} (but recommended version no longer allows #{now_excluded.join(' or ')})"
+        # "#{current_licenses.join(' or ')} (but rec'd ver. doesn't allow #{now_excluded.join(' or ')})"
+        LicenseDescription.new(current_licenses.join(' or ')).tap do |desc|
+          desc.update_info = "rec'd ver. doesn't allow #{now_excluded.join(' or ')}"
+        end
       when current_licenses.empty? && !now_included.empty?
-        "Recommended version: #{now_included.join(' or ')}"
+        LicenseDescription.new("Rec'd ver.: #{now_included.join(' or ')}")
       when !now_included.empty?
-        "#{current_licenses.join(' or ')} (or #{now_included.join(' or ')} on upgrade to recommended version)"
+        # "#{current_licenses.join(' or ')} (or #{now_included.join(' or ')} on upgrade to rec'd ver.)"
+        LicenseDescription.new(current_licenses.join(' or ')).tap do |desc|
+          desc.update_info = "or #{now_included.join(' or ')} on upgrade to rec'd ver."
+        end
       else
-        "#{current_licenses.join(' or ')} (recommended version: #{rcmdd_licenses.join(' or ')})"
+        # "#{current_licenses.join(' or ')} (rec'd ver.: #{rcmdd_licenses.join(' or ')})"
+        LicenseDescription.new(current_licenses.join(' or ')).tap do |desc|
+          desc.update_info = "rec'd ver.: #{rcmdd_licenses.join(' or ')}"
+        end
       end
     end
     
@@ -167,6 +178,43 @@ module MyPrecious
     
     def changelog
       changelogs[0]
+    end
+    
+    def days_between_current_and_recommended
+      v, cv_rel = versions_with_release.find {|v, r| v == current_version} || []
+      v, rv_rel = versions_with_release.find {|v, r| v == recommended_version} || []
+      return nil if cv_rel.nil? || rv_rel.nil?
+      
+      return ((rv_rel - cv_rel) / ONE_DAY).to_i
+    end
+    
+    def obsolescence
+      cv_major = current_version && current_version.segments[0]
+      rv_major = recommended_version && recommended_version.segments[0]
+      at_least_moderate = false
+      case 
+      when cv_major.nil? || rv_major.nil?
+        # Can't compare
+      when cv_major + 1 < rv_major
+        # More than a single major version difference is severe
+        return :severe
+      when cv_major < rv_major
+        # Moderate obsolescence if we're a major version behind
+        at_least_moderate = true
+      end
+      
+      days_between = days_between_current_and_recommended
+      
+      return case 
+      when days_between < 200
+        at_least_moderate ? :moderate : nil
+      when days_between < 500
+        at_least_moderate ? :moderate : :mild
+      when days_between < 750
+        :moderate
+      else
+        :severe
+      end
     end
     
     private
