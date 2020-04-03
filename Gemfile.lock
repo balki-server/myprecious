@@ -1,0 +1,40 @@
+PATH
+  remote: .
+  specs:
+    myprecious (0.0.8)
+      gems (~> 1.0, >= 1.0.0)
+      git (~> 1.5, >= 1.5.0)
+      rake-toolkit_program
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    coderay (1.1.2)
+    colorize (0.8.1)
+    dedent (1.0.1)
+    gems (1.2.0)
+    git (1.6.0)
+      rchardet (~> 1.8)
+    method_source (1.0.0)
+    pry (0.13.0)
+      coderay (~> 1.1)
+      method_source (~> 1.0)
+    rake (13.0.1)
+    rake-toolkit_program (0.1.1)
+      colorize (~> 0.8)
+      dedent (~> 1.0)
+      rake (>= 10.0)
+    rb-readline (0.5.5)
+    rchardet (1.8.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  bundler (~> 1.13)
+  myprecious!
+  pry (~> 0.13)
+  rb-readline (~> 0.5)
+
+BUNDLED WITH
+   1.17.3
