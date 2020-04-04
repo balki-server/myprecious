@@ -7,7 +7,10 @@ require 'rake/toolkit_program'
 # Declare the module here so it doesn't cause problems for files in the
 # "myprecious" directory (or _does_ cause problems if they try to declare
 # it a class)
-module MyPrecious; end
+module MyPrecious
+  DATA_DIR = Pathname('~/.local/lib/myprecious').expand_path
+  ONE_DAY = 60 * 60 * 24
+end
 require 'myprecious/data_caches'
 require 'myprecious/ruby_gems'
 

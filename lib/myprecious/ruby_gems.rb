@@ -4,14 +4,14 @@ require 'pathname'
 
 module MyPrecious
   class RubyGemInfo
+    include DataCaching
+    
     MIN_RELEASED_DAYS = 90
     MIN_STABLE_DAYS = 14
     
-    DATA_DIR = Pathname('~/.local/lib/myprecious').expand_path
     INFO_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / 'rb-info-cache')
     VERSIONS_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / 'rb-versions-cache')
     
-    ONE_DAY = 60 * 60 * 24
     SOURCE_CODE_URI_ENTRIES = %w[github_repo source_code_uri]
     
     ##
@@ -263,38 +263,6 @@ module MyPrecious
         apply_cache(cache) {Gems.versions(name)}
       end
       
-      ##
-      # Use cached data in or write data to a file cache
-      #
-      # +cache+ should be a Pathname to a file in which JSON data or can
-      # be cached.
-      #
-      # The block given will only be invoked if the cache does not exist or
-      # is stale.  The block must return JSON.dump -able data.
-      #
-      def apply_cache(cache, &get_data)
-        if !MyPrecious.caching_disabled && cache.exist? && cache.stat.mtime > Time.now - ONE_DAY
-          return cache.open('r') {|inf| JSON.load(inf)}
-        else
-          # Short-circuit to error if we've already received one for filling this cache
-          if @errors_fetching && @errors_fetching[cache]
-            raise @errors_fetching[cache]
-          end
-          
-          result = begin
-            print_error_info(&get_data)
-          rescue StandardError => e
-            # Remember this error in case there is another attempt to fill this cache
-            (@errors_fetching ||= {})[cache] = e
-            raise
-          end
-          
-          cache.dirname.mkpath
-          cache.open('w') {|outf| JSON.dump(result, outf)}
-          return result
-        end
-      end
-      
       def get_age
         versions_with_release.each do |ver, released|
           return ((Time.now - released) / ONE_DAY).to_i if ver == current_version
@@ -304,15 +272,6 @@ module MyPrecious
       
       def nonpatch_versegs(v)
         v.segments[0..-2]
-      end
-      
-      def print_error_info
-        yield
-      rescue Interrupt
-        raise
-      rescue StandardError => e
-        $stderr.puts "Error processing gem #{name.inspect}: #{e.message}"
-        raise
       end
   end
 end
