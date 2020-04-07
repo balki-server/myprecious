@@ -1,8 +1,11 @@
 require 'json'
 require 'myprecious'
 require 'myprecious/data_caches'
+require 'open-uri'
+require 'open3'
 require 'parslet'
 require 'rest-client'
+require 'zip'
 
 module MyPrecious
   class PyPackageInfo
@@ -13,6 +16,7 @@ module MyPrecious
     MIN_STABLE_DAYS = 14
     
     PACKAGE_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / "py-package-cache")
+    CODE_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / "py-code-cache")
     
     ACCEPTED_URI_SCHEMES = %w[
       http
@@ -40,6 +44,7 @@ module MyPrecious
       
       continued_line = ''
       packages_fpath.each_line do |pkg_line|
+        pkg_line = pkg_line.chomp
         next if /^#/ =~ pkg_line
         if /(?<=\s)#.*$/ =~ pkg_line
           pkg_line = pkg_line[0...-$&.length]
@@ -83,13 +88,20 @@ module MyPrecious
           return
         end
         
-        # Transform parse tree into a spec
-        spec = ReqSpecTransform.new.apply_spec(parse_tree)
-        if spec.kind_of?(PackageRequirements)
-          spec.values.each {|rs| rs.each {|r| r.install ||= !only_constrain}}
-          yield spec
-        else
-          warn("Unhandled requirement parse tree: #{explain_parse_tree(parse_tree)}")
+        # TODO: Better implementation that actually evaluates the marker logic
+        # to determine if this spec applies to our situation
+        spec_applies = !parse_tree.has_key?(:markers)
+        
+        if spec_applies
+          # Transform parse tree into a spec
+          spec = ReqSpecTransform.new.apply_spec(parse_tree)
+          if spec.kind_of?(PackageRequirements)
+            spec.values.each {|rs| rs.each {|r| r.install ||= !only_constrain}}
+            #require 'rb-readline'; require 'byebug'; byebug
+            yield spec
+          else
+            warn("Unhandled requirement parse tree: #{explain_parse_tree(parse_tree)}")
+          end
         end
       end
     end
@@ -105,9 +117,114 @@ module MyPrecious
       end
     end
     
-    def self.yield_spec_from_uri(fpath, pkg_line)
-      # TODO: Implement
-      warn("Unable to process URI package requirement: #{pkg_line}")
+    def self.yield_spec_from_uri(fpath, pkg_line, &blk)
+      uri = begin
+        URI.parse(pkg_line)
+      rescue URI::InvalidURIError
+        warn("Unable to process package requirement in #{fpath}: #{pkg_line}")
+        return
+      end
+      
+      case uri.scheme
+      when 'git'
+        # uri is a git-clone URL
+        yield_spec_from_git(uri, &blk)
+      when /^git\+/
+        uri = URI.parse(pkg_line[4..-1])
+        # _now_ uri is a git-clone URL
+        yield_spec_from_git(uri, &blk)
+      when 'http', 'https'
+        # uri is a .ZIP package
+        yield_spec_from_zip_uri(uri, &blk)
+      else
+        warn("Unable to process URI package requirement in #{fpath}: #{pkg_line}")
+      end
+    end
+    
+    def self.yield_spec_from_git(uri)
+      warn("Unable to process Git package requirement: #{uri}")
+      return
+      
+      path, committish = uri.path.split('@', 2)
+      git_url = "#{uri.scheme}://#{uri.host}#{path}"
+      repo_path = CODE_CACHE_DIR.join("git_#{Digest::MD5.hexdigest(git_url)}")
+      
+      CODE_CACHE_DIR.mkpath
+      
+      cmd = ['git', 'clone']
+      cmd.push('-n') if committish
+      cmd.push(git_url, repo_path)
+      # TODO: Run cmd
+      
+      if committish
+        cmd = ['git', '-C', repo_path, 'checkout', committish]
+        # TODO: Run cmd
+      end
+      
+      # TODO: Run Python code to print out the requirement line
+    end
+    
+    def self.yield_spec_from_zip_uri(uri, &blk)
+      zip_path = CODE_CACHE_DIR.join("zip_#{Digest::MD5.hexdigest(uri.to_s)}")
+      CODE_CACHE_DIR.mkpath
+      uri.open('rb') do |uri_f|
+        Zip::File.open_buffer(uri_f) do |zip_file|
+          zip_file.each do |entry|
+            if entry.name_safe?
+              dest_file = zip_path.join(entry.name.split('/',2)[1])
+              dest_file.dirname.mkpath
+              entry.extract(dest_file.to_s) {:overwrite}
+            else
+              warn("Did not extract #{entry.name} from #{uri}")
+            end
+          end
+        end
+      end
+      
+      # Run Python code to get package information
+      setup_info = load_setup_info(zip_path)
+      process_package_line(
+        zip_path.join('setup.py'),
+        "#{setup_info['name']}==#{setup_info['version']}",
+        only_constrain: false,
+        &blk
+      )
+      (setup_info['install_requires'] || []).each do |dep|
+        process_package_line(
+          zip_path.join('setup.py'),
+          dep,
+          only_constrain: false,
+          &blk
+        )
+      end
+    end
+    
+    def self.load_setup_info(workdir)
+      cmd = ['python3']
+      python_code = <<~END_OF_PYTHON
+        import json, sys
+        from unittest.mock import patch
+
+        sys.path[0:0] = ['.']
+
+        def capture_setup(**kwargs):
+            capture_setup.captured = kwargs
+
+        with patch('setuptools.setup', capture_setup):
+            import setup
+
+        json.dump(
+          capture_setup.captured,
+          sys.stdout,
+          default=lambda o: "<{}.{}>".format(type(o).__module__, type(o).__qualname__),
+        )
+      END_OF_PYTHON
+      
+      output, status = Dir.chdir(workdir) do
+        Open3.capture2('python3', stdin_data: python_code)
+      end
+      raise "Failed to read setup.py in #{workdir}" unless status.success?
+      JSON.parse(output)
     end
     
     def self.each_installed_package(packages_fpath)
@@ -135,9 +252,9 @@ module MyPrecious
         # Add any dependencies of item to to_install if they are not yet
         # in pkg_info
         item.each_transitive_requirement do |req|
-          req.each_pair do |dep_name, dep_reqs|
-            package_constraints += dep_reqs
-            next if pkg_info.has_key?(dep_name)
+          package_constraints += req
+          req.keys.reject {|k| pkg_info.has_key?(k)}.each do |dep_name|
+            dep_reqs = req[dep_name]
             pkg_info[dep_name] = new(dep_name, dep_reqs)
             to_install << dep_name
           end
@@ -186,6 +303,7 @@ module MyPrecious
     end
     
     def each_transitive_requirement(&blk)
+      return if current_version.nil? || current_version.prerelease?
       transitive_require_info = get_release_info(current_version)['info']['requires_dist']
       (transitive_require_info || []).each do |reqmt_line|
         PyPackageInfo.process_package_line(
@@ -436,7 +554,7 @@ module MyPrecious
     
     class ReqSpecTransform < Parslet::Transform
       rule(:verreq => {op: simple(:o), ver: simple(:v)}) {Requirement.new(o.to_s, v.to_s)}
-      rule(package: simple(:n)) {|c| package_reqs(c[:n] => [Requirement.new('>=', '0a0dev')])}
+      rule(package: simple(:n)) {|c| package_reqs(c[:n].to_s => [Requirement.new('>=', '0a0dev')])}
       rule(package: simple(:n), verreqs: sequence(:rs)) {|c| package_reqs(c[:n].to_s => c[:rs])}
       rule(package: simple(:n), url: simple(:url)) do |c|
         package_reqs(c[:n].to_s => URI.parse(c[:url].to_s).extend(MayNeedInstall))
@@ -526,7 +644,11 @@ module MyPrecious
           self.vernum == version.to_s
         else
           req_key, cand_key = comp_keys(version)
-          (cand_key <=> req_key).send(op, 0)
+          if comp_result = (cand_key <=> req_key)
+            comp_result.send(op, 0)
+          else
+            warn("Cannot test #{cand_key.inspect} #{op} #{req_key} (<=> returned nil)")
+          end
         end
       end
       
@@ -537,7 +659,7 @@ module MyPrecious
         
         def series(comp_key)
           comp_key.dup.tap do |result|
-            result[1].to_series
+            result.final.to_series
           end
         end
     end
@@ -557,7 +679,7 @@ module MyPrecious
           |
           - # Implicit post release
         )
-        (?<post> \d* )
+        (?<post> ((?<![._-]) | \d) \d* )
       )?
       (           # Development release group
         [._-]?
@@ -772,6 +894,7 @@ module MyPrecious
         versions_with_release.each do |vnum, released|
           return ((Time.now - released) / ONE_DAY).to_i if vnum == current_version
         end
+        return nil
       end
       
       def nonpatch_versegs(ver)

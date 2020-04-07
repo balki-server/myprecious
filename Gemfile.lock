@@ -4,9 +4,10 @@ PATH
     myprecious (0.0.8)
       gems (~> 1.0, >= 1.0.0)
       git (~> 1.5, >= 1.5.0)
-      parslet (~> 2.0.0)
+      parslet (~> 2.0)
       rake-toolkit_program
       rest-client (~> 2.0.2, >= 2.0)
+      rubyzip (~> 2.3)
 
 GEM
   remote: https://rubygems.org/
@@ -42,6 +43,7 @@ GEM
       http-cookie (>= 1.0.2, < 2.0)
       mime-types (>= 1.16, < 4.0)
       netrc (~> 0.8)
+    rubyzip (2.3.0)
     unf (0.1.4)
       unf_ext
     unf_ext (0.0.7.7)

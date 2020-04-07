@@ -449,7 +449,14 @@ module MyPrecious
     def recommended_version
       recommended_version = dependency.recommended_version
       if dependency.current_version < recommended_version
-        "**#{recommended_version}** -- #{dependency.days_between_current_and_recommended} days newer"
+        span_comment = begin
+          if days_newer = dependency.days_between_current_and_recommended
+            " -- #{days_newer} days newer"
+          else
+            ""
+          end
+        end
+        "**#{recommended_version}**#{span_comment}"
       else
         recommended_version
       end
