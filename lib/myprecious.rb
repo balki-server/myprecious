@@ -3,6 +3,7 @@ require 'git'
 require 'ostruct'
 require 'pathname'
 require 'rake/toolkit_program'
+require 'uri'
 
 # Declare the module here so it doesn't cause problems for files in the
 # "myprecious" directory (or _does_ cause problems if they try to declare
@@ -12,7 +13,6 @@ module MyPrecious
   ONE_DAY = 60 * 60 * 24
 end
 require 'myprecious/data_caches'
-require 'myprecious/ruby_gems'
 
 module MyPrecious
   extend Rake::DSL
@@ -20,33 +20,37 @@ module MyPrecious
   Program = Rake::ToolkitProgram
   Program.title = "myprecious Dependecy Reporting Tool"
   
+  def self.common_program_args(parser, args)
+    parser.on(
+      '-o', '--out FILE',
+      "Output file to generate",
+    ) {|fpath| args.output_file = Pathname(fpath)}
+    
+    args.target = Pathname.pwd
+    parser.on(
+      '-C', '--dir PATH',
+      "Path to inspect",
+    ) do |fpath|
+      fpath = Pathname(fpath)
+      parser.invalid_args!("#{fpath} does not exist.") unless fpath.exist?
+      args.target = fpath
+    end
+    
+    parser.on(
+      '--[no-]cache',
+      "Control caching of gem information"
+    ) {|v| MyPrecious.caching_disabled = v}
+  end
+  
   # Declare the tasks exposed as subcommands in this block
   Program.command_tasks do
     desc "Generate report on Ruby gems"
     task('ruby-gems').parse_args(into: OpenStruct.new) do |parser, args|
       parser.expect_positional_cardinality(0)
-      
-      parser.on(
-        '-o', '--out FILE',
-        "Output file to generate",
-      ) {|fpath| args.output_file = Pathname(fpath)}
-      
-      args.target = Pathname.pwd
-      parser.on(
-        '-C', '--dir PATH',
-        "Path to inspect",
-      ) do |fpath|
-        fpath = Pathname(fpath)
-        parser.invalid_args!("#{fpath} does not exist.") unless fpath.exist?
-        args.target = fpath
-      end
-      
-      parser.on(
-        '--[no-]cache',
-        "Control caching of gem information"
-      ) {|v| MyPrecious.caching_disabled = v}
+      common_program_args(parser, args)
     end
     task 'ruby-gems' do
+      require 'myprecious/ruby_gems'
       args = Program.args
       out_fpath = args.output_file || Reporting.default_output_fpath(args.target)
       
@@ -67,10 +71,62 @@ module MyPrecious
         
         # Iterate all gems in name order, pulling column values from the RubyGemInfo objects
         gems.keys.sort_by {|n| n.downcase}.map {|name| gems[name]}.each do |gem|
-          outf.puts col_order.markdown_columns(MarkdownAdapter.new(gem))
+          Reporting.on_dependency(gem.name) do
+            outf.puts col_order.markdown_columns(MarkdownAdapter.new(gem))
+          end
         end
       end
         
+    end
+    
+    desc "Generate report on Python packages"
+    task('python-packages').parse_args(into: OpenStruct.new) do |parser, args|
+      parser.expect_positional_cardinality(0)
+      common_program_args(parser, args)
+      
+      parser.on(
+        '-r', '--requirements-file=FILE',
+        "requirements.txt-style file to read"
+      ) do |file|
+        if args.requirements_file
+          invalid_args!("Only one requirements file may be specified.")
+        end
+        args.requirements_file = file
+      end
+    end
+    task 'python-packages' do
+      require 'myprecious/python_packages'
+      args = Program.args
+      out_fpath = args.output_file || Reporting.default_output_fpath(args.target)
+      
+      col_order = Reporting.read_column_order_from(out_fpath)
+      
+      req_file = args.requirements_file
+      req_file ||= PyPackageInfo.guess_req_file(args.target)
+      req_file = args.target.join(req_file) unless req_file.nil?
+      if req_file.nil? || !req_file.exist?
+        invalid_args!("Unable to guess requirement file name; specify with '-r FILE' option.")
+      end
+      pkgs = PyPackageInfo.each_installed_package(req_file)
+      
+      out_fpath.open('w') do |outf|
+        # Header
+        outf.puts "Last updated: #{Time.now.rfc2822}; Use for directional purposes only, this data is not real time and might be slightly inaccurate"
+        outf.puts
+        
+        Reporting.header_lines(
+          col_order,
+          PyPackageInfo.method(:col_title)
+        ).each {|l| outf.puts l}
+        
+        pkgs = pkgs.to_a
+        pkgs.sort_by! {|pkg| pkg.name.downcase}
+        pkgs.each do |pkg|
+          Reporting.on_dependency(pkg.name) do
+            outf.puts col_order.markdown_columns(MarkdownAdapter.new(pkg))
+          end
+        end
+      end
     end
     
     desc "Clear all myprecious data caches"
@@ -84,6 +140,9 @@ module MyPrecious
       end
     end
     task 'clear-caches' do
+      # Load all "myprecious/*.rb" files so we know where all the caches are
+      Dir[File.expand_path('myprecious/*.rb', __dir__)].each {|f| require f}
+      
       next if Program.args.prompt && !yes_no('Delete all cached data (y/n)?')
       MyPrecious.data_caches.each do |cache|
         begin
@@ -189,6 +248,14 @@ module MyPrecious
     #
     def header_lines(order, titlizer)
       col_titles = order.map {|c| titlizer.call(c)}
+      
+      # Check that all attributes in #order round-trip through the title name
+      order.zip(col_titles) do |attr, title|
+        unless title.kind_of?(Symbol) || ColumnOrder.col_from_text_name(title) == attr
+          raise "'#{attr}' does not round-trip (rendered as #{result.inspect})"
+        end
+      end
+      
       return [
         col_titles.join(" | "),
         (["---"] * col_titles.length).join(" | "),
@@ -241,6 +308,18 @@ module MyPrecious
       end
     end
     module_function :obsolescence_by_age
+    
+    ##
+    # Wrap output from processing of an individual dependency with intro and
+    # outro messages
+    #
+    def on_dependency(name)
+      progress_out = $stdout
+      progress_out.puts("--- Reporting on #{name}...")
+      yield
+      progress_out.puts("    (done)")
+    end
+    module_function :on_dependency
   end
   
   ##
@@ -452,4 +531,13 @@ module MyPrecious
       "(error)"
     end
   end
+  
+  module URIModuleMethods
+    def try_parse(s)
+      parse(s)
+    rescue URI::InvalidURIError
+      nil
+    end
+  end
+  URI.extend(URIModuleMethods)
 end

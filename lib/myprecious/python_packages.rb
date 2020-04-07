@@ -1,3 +1,4 @@
+require 'json'
 require 'myprecious'
 require 'myprecious/data_caches'
 require 'parslet'
@@ -7,15 +8,30 @@ module MyPrecious
   class PyPackageInfo
     include DataCaching
     
+    COMMON_REQ_FILE_NAMES = %w[requirements.txt Packages]
     MIN_RELEASED_DAYS = 90
     MIN_STABLE_DAYS = 14
     
     PACKAGE_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / "py-package-cache")
     
+    ACCEPTED_URI_SCHEMES = %w[
+      http
+      https
+      git
+      git+git
+      git+http
+      git+https
+      git+ssh
+    ]
+    
     ##
     # Enumerate Python packages required or constrained in a project
     #
     # +packages_fpath+ should refer to a pip requirements.txt-style file
+    #
+    # Yields Hash objects extended with PackageRequirements, where each Hash
+    # has one entry whose key is the name of a package and whose value is an
+    # Array of Requirement objects.
     #
     def self.each_package_constrained(packages_fpath, only_constrain: false, &blk)
       return enum_for(:each_package_constrained, packages_fpath) unless block_given?
@@ -35,13 +51,13 @@ module MyPrecious
           next
         end
         pkg_line, continued_line = (continued_line + pkg_line).strip, ''
-        next if pkg_line.strip.empty?
+        next if pkg_line.empty?
         
         process_package_line(packages_fpath, pkg_line, only_constrain: only_constrain, &blk)
       end
     end
     
-    def self.process_package_line(fpath, pkg_line, only_constrain:)
+    def self.process_package_line(fpath, pkg_line, only_constrain:, &blk)
       case pkg_line
       when /^-r (.)$/
         each_package_constrained(
@@ -59,10 +75,8 @@ module MyPrecious
         parse_tree = begin
           ReqSpecParser.new.parse(pkg_line)
         rescue Parslet::ParseFailed
-          if /^https?:/ =~ pkg_line
-            yield (URI.parse(pkg_line).extend(MayNeedInstall).tap do |uri|
-              uri.install = !only_constrain
-            end)
+          if (uri = URI.try_parse(pkg_line)) && ACCEPTED_URI_SCHEMES.include?(uri.scheme)
+            yield_spec_from_uri(fpath, pkg_line, &blk) unless only_constrain
             return
           end
           warn("Unreportable line in #{fpath}: #{pkg_line}")
@@ -74,7 +88,238 @@ module MyPrecious
         if spec.kind_of?(PackageRequirements)
           spec.values.each {|rs| rs.each {|r| r.install ||= !only_constrain}}
           yield spec
+        else
+          warn("Unhandled requirement parse tree: #{explain_parse_tree(parse_tree)}")
         end
+      end
+    end
+    
+    def self.explain_parse_tree(parse_tree)
+      case parse_tree
+      when Array
+        "[#{parse_tree.map {|i| "#<#{i.class.name}>"}.join(', ')}]"
+      when Hash
+        "{#{parse_tree.map {|k, v| "#{k.inspect} => #<#{v.class.name}>"}.join(', ')}}"
+      else
+        "#<#{parse_tree.class.name}>"
+      end
+    end
+    
+    def self.yield_spec_from_uri(fpath, pkg_line)
+      # TODO: Implement
+      warn("Unable to process URI package requirement: #{pkg_line}")
+    end
+    
+    def self.each_installed_package(packages_fpath)
+      return enum_for(:each_installed_package, packages_fpath) unless block_given?
+      
+      package_constraints = nil
+      
+      each_package_constrained(packages_fpath) do |cnstrt|
+        package_constraints = package_constraints ? (package_constraints + cnstrt) : cnstrt
+      end
+      
+      pkg_info = {}
+      to_install = []
+      package_constraints.each_pair do |pkg_name, reqs|
+        next unless reqs.any? {|r| r.install}
+        pkg_info[pkg_name] ||= new(pkg_name, reqs)
+        to_install << pkg_name
+      end
+      
+      while pkg_name = to_install.shift
+        item = pkg_info[pkg_name]
+        item.resolve_version!(package_constraints)
+        yield item
+        
+        # Add any dependencies of item to to_install if they are not yet
+        # in pkg_info
+        item.each_transitive_requirement do |req|
+          req.each_pair do |dep_name, dep_reqs|
+            package_constraints += dep_reqs
+            next if pkg_info.has_key?(dep_name)
+            pkg_info[dep_name] = new(dep_name, dep_reqs)
+            to_install << dep_name
+          end
+        end
+      end
+    end
+    
+    def self.guess_req_file(fpath)
+      COMMON_REQ_FILE_NAMES.find do |fname|
+        fpath.join(fname).exist?
+      end
+    end
+    
+    def self.col_title(attr)
+      case attr
+      when :name then 'Package'
+      else Reporting.common_col_title(attr)
+      end
+    end
+    
+    def initialize(name, version_reqs)
+      super()
+      @name = name
+      @version_reqs = version_reqs
+      dvreq = @version_reqs.find(&:determinative?)
+      @current_version = dvreq && parse_version_str(dvreq.vernum)
+    end
+    attr_reader :name, :version_reqs
+    #attr_accessor :current_version
+    
+    def current_version
+      @current_version
+    end
+    
+    def current_version=(val)
+      @current_version = val.kind_of?(Version) ? val : parse_version_str(val)
+    end
+    
+    def resolve_version!(pkg_constraints)
+      # Determine version if @current_version.nil?
+      unless self.current_version
+        if inferred_ver = latest_version_satisfying_reqs
+          self.current_version = inferred_ver
+        end
+      end
+    end
+    
+    def each_transitive_requirement(&blk)
+      transitive_require_info = get_release_info(current_version)['info']['requires_dist']
+      (transitive_require_info || []).each do |reqmt_line|
+        PyPackageInfo.process_package_line(
+          nil,
+          reqmt_line,
+          only_constrain: false,
+          &blk
+        )
+      end
+    end
+    
+    def versions_with_release
+      @versions ||= begin
+        all_releases = get_package_info.fetch('releases', {})
+        ver_release_pairs = all_releases.each_pair.map do |ver, info|
+          [
+            parse_version_str(ver),
+            info.select {|f| f['packagetype'] == 'sdist'}.map do |f|
+              Time.parse(f['upload_time_iso_8601'])
+            end.min
+          ].freeze
+        end
+        ver_release_pairs.reject! do |vn, rd|
+          (vn.kind_of?(Version) && vn.prerelease?) || rd.nil?
+        end
+        ver_release_pairs.sort! do |l, r|
+          case 
+          when l[0].kind_of?(String) && r[0].kind_of?(Version) then -1
+          when l[0].kind_of?(Version) && r[0].kind_of?(String) then 1
+          else l <=> r
+          end
+        end
+        ver_release_pairs.reverse!
+        ver_release_pairs.freeze
+      end
+    end
+    
+    def latest_version_satisfying_reqs
+      versions_with_release.each do |ver, rel_date|
+        return ver if version_reqs.all? {|req| req.satisfied_by?(ver.to_s)}
+      end
+      return nil
+    end
+    
+    def age
+      return @age if defined? @age
+      @age = get_age
+    end
+    
+    def latest_version
+      versions_with_release[0][0].to_s
+    end
+    
+    def latest_released
+      versions_with_release[0][1]
+    end
+    
+    def recommended_version
+      return nil if versions_with_release.empty?
+      return @recommended_version if defined? @recommended_version
+      
+      orig_time_horizon = time_horizon = \
+        Time.now - (MIN_RELEASED_DAYS * ONE_DAY)
+      horizon_versegs = nil
+      versions_with_release.each do |vn, rd|
+        if vn.kind_of?(Version)
+          horizon_versegs = nonpatch_versegs(vn)
+          break
+        end
+      end
+      
+      versions_with_release.each do |ver, released|
+        next if ver.kind_of?(String) || ver.prerelease?
+        return (@recommended_version = current_version) if current_version && current_version >= ver
+        
+        # Reset the time-horizon clock if moving back into previous patch-series
+        if (nonpatch_versegs(ver) <=> horizon_versegs) < 0
+          time_horizon = orig_time_horizon
+        end
+        
+        if released < time_horizon && version_reqs.all? {|r| r.satisfied_by?(ver, strict: false)}
+          return (@recommended_version = ver)
+        end
+        time_horizon = [time_horizon, released - (MIN_STABLE_DAYS * ONE_DAY)].min
+      end
+      return (@recommended_version = nil)
+    end
+    
+    def homepage_uri
+      get_package_info['info']['home_page']
+    end
+    
+    def license
+      # TODO: Implement better, showing difference between current and recommended
+      LicenseDescription.new(get_package_info['info']['license'])
+    end
+    
+    def changelog
+      # This is wrong
+      info = get_package_info['info']
+      return info['project_url']
+    end
+    
+    def days_between_current_and_recommended
+      v, cv_rel = versions_with_release.find {|v, r| v == current_version} || []
+      v, rv_rel = versions_with_release.find {|v, r| v == recommended_version} || []
+      return nil if cv_rel.nil? || rv_rel.nil?
+      
+      return ((rv_rel - cv_rel) / ONE_DAY).to_i
+    end
+    
+    def obsolescence
+      at_least_moderate = false
+      if current_version.kind_of?(Version) && recommended_version
+        cv_major = [current_version.epoch, current_version.final.first]
+        rv_major = [recommended_version.epoch, recommended_version.final.first]
+        
+        case 
+        when rv_major[0] < cv_major[0]
+          return nil
+        when cv_major[0] < rv_major[0]
+          # Can't compare, rely on days_between_current_and_recommended
+        when cv_major[1] + 1 < rv_major[1]
+          return :severe
+        when cv_major[1] < rv_major[1]
+          at_least_moderate = true
+        end
+        
+        days_between = days_between_current_and_recommended
+        
+        return Reporting.obsolescence_by_age(
+          days_between,
+          at_least_moderate: at_least_moderate,
+        )
       end
     end
     
@@ -211,7 +456,7 @@ module MyPrecious
     end
     
     module PackageRequirements
-      def |(rhs)
+      def +(rhs)
         unless rhs.kind_of?(PackageRequirements)
           raise TypeError, "right hand side of | must be PackageRequirements"
         end
@@ -228,6 +473,11 @@ module MyPrecious
     
     module MayNeedInstall
       attr_accessor :install
+      
+      def self.on(obj, install_value = nil)
+        obj.extend(self) unless obj.kind_of?(self)
+        obj.install = install_value unless install_value.nil?
+      end
     end
     
     class Requirement
@@ -252,16 +502,28 @@ module MyPrecious
       
       include MayNeedInstall
       
-      def satisfied_by?(version)
+      def determinative?
+        [:==, :str_equal].include?(op)
+      end
+      
+      ##
+      # Query if this requirement is satisfied by a particular version
+      #
+      # When +strict:+ is false and the instance is an equality-type requirement
+      # (i.e. the +op+ is +:==+ or +:str_equal+), the result is always +true+.
+      #
+      def satisfied_by?(version, strict: true)
         req_key = PyPackageInfo.parse_version_str(self.vernum)
         cand_key = PyPackageInfo.parse_version_str(version)
+        
+        return true if !strict && %i[== str_equal].include?(op)
         
         return case op
         when :compatible
           req_key, cand_key = comp_keys(version)
           (cand_key <=> req_key) >= 0 && (cand_key <=> series(req_key)) == 0
         when :str_equal
-          self.vernum == version
+          self.vernum == version.to_s
         else
           req_key, cand_key = comp_keys(version)
           (cand_key <=> req_key).send(op, 0)
@@ -308,27 +570,31 @@ module MyPrecious
       )?
     $/x
 
-    
-    def self.parse_version_str(s)
-      return s unless parts = VERSION_PATTERN.match(s.downcase)
-      
-      # Normalization
-      pre_group = case parts[:pre_group]
-      when 'alpha' then 'a'
-      when 'beta' then 'b'
-      when 'c', 'pre', 'preview' then 'rc'
-      else parts[:pre_group]
+    module VersionParsing
+      def parse_version_str(s)
+        return s if s.kind_of?(Version)
+        return s unless parts = VERSION_PATTERN.match(s.downcase)
+        
+        # Normalization
+        pre_group = case parts[:pre_group]
+        when 'alpha' then 'a'
+        when 'beta' then 'b'
+        when 'c', 'pre', 'preview' then 'rc'
+        else parts[:pre_group]
+        end
+        
+        return Version.new(
+          FinalVersion.new(parts[:final]),
+          epoch: parts[:epoch],
+          pre: [pre_group, parts[:pre_n]],
+          post: parts[:post],
+          dev: parts[:dev],
+          local: parts[:local],
+        )
       end
-      
-      return Version.new(
-        final,
-        epoch: parts[:epoch],
-        pre: [pre_group, parts[:pre_n]],
-        post: parts[:post],
-        dev: parts[:dev],
-        local: parts[:local],
-      )
     end
+    extend VersionParsing
+    include VersionParsing
     
     class Version
       NOT_PRE = ['z', 0]
@@ -340,11 +606,27 @@ module MyPrecious
         @post = normalize_part(post) {|n| n && [n] }
         @dev = normalize_part(dev) {|n| n}
         @local = case local
+        when nil then nil
         when Array then local
         else local.to_s.split(/[._-]/).map {|part| try_to_i(part)}
         end
       end
       attr_reader *%i[epoch final local]
+      
+      def inspect
+        "#<#{self.class.name} #{to_s.inspect}>"
+      end
+      
+      def to_s
+        [].tap do |parts|
+          parts << "#{epoch}!" unless epoch == 0
+          parts << final.to_s
+          parts << "#{@pre[0]}#{@pre[1]}" if @pre
+          parts << "post#{@post}" if @post
+          parts << "dev#{@dev}" if @dev
+          parts << "+#{local}" if local
+        end.join('')
+      end
       
       def pre_group
         @pre && @pre[0]
@@ -356,7 +638,7 @@ module MyPrecious
       
       def <=>(rhs)
         return nil unless rhs.kind_of?(self.class)
-        Enumerator.new do |comps|
+        steps = Enumerator.new do |comps|
           %i[epoch final pre_comp post_comp dev_comp].each do |attr|
             comps << (send(attr) <=> rhs.send(attr))
           end
@@ -367,6 +649,12 @@ module MyPrecious
           else comps << (local <=> rhs.local)
           end
         end
+        steps.find {|v| v != 0} || 0
+      end
+      include Comparable
+      
+      def prerelease?
+        !!(@pre || @dev)
       end
       
       private
@@ -430,7 +718,7 @@ module MyPrecious
       
       def <=>(rhs)
         nil unless rhs.kind_of?(FinalVersion)
-        0..Float::INFINITY.lazy.each do |i|
+        (0..Float::INFINITY).lazy.each do |i|
           return 0 if self[i].nil? && rhs[i].nil?
           return 0 if [self[i], rhs[i]].include?(:*)
           diff = (self[i] || 0) <=> (rhs[i] || 0)
@@ -454,5 +742,41 @@ module MyPrecious
           end
         end
     end
+    
+    def pypi_url
+      "https://pypi.python.org/pypi/#{name}/json"
+    end
+    
+    def pypi_release_url(release)
+      "https://pypi.python.org/pypi/#{name}/#{release}/json"
+    end
+    
+    private
+      def get_package_info
+        cache = PACKAGE_CACHE_DIR.join("#{name}.json")
+        apply_cache(cache) do
+          pypi_response = RestClient.get(pypi_url)
+          JSON.parse(pypi_response)
+        end
+      end
+      
+      def get_release_info(release)
+        cache = PACKAGE_CACHE_DIR.join(name, "#{release}.json")
+        apply_cache(cache) do
+          pypi_response = RestClient.get(pypi_release_url(release))
+          JSON.parse(pypi_response)
+        end
+      end
+      
+      def get_age
+        versions_with_release.each do |vnum, released|
+          return ((Time.now - released) / ONE_DAY).to_i if vnum == current_version
+        end
+      end
+      
+      def nonpatch_versegs(ver)
+        return nil if ver.nil?
+        [ver.epoch] + ver.final.take(2)
+      end
   end
 end

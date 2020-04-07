@@ -86,10 +86,6 @@ module MyPrecious
       case attr
       when :name then 'Gem'
       else Reporting.common_col_title(attr)
-      end.tap do |result|
-        unless result.kind_of?(Symbol) || ColumnOrder.col_from_text_name(result) == attr
-          raise "'#{attr}' does not round-trip (rendered as #{result.inspect})"
-        end
       end
     end
     
