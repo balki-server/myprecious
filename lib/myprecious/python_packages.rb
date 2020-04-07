@@ -296,8 +296,12 @@ module MyPrecious
     def resolve_version!(pkg_constraints)
       # Determine version if @current_version.nil?
       unless self.current_version
+        puts "Resolving current version of #{name}..."
         if inferred_ver = latest_version_satisfying_reqs
           self.current_version = inferred_ver
+          puts "    -> #{inferred_ver}"
+        else
+          puts "    (unknown)"
         end
       end
     end
