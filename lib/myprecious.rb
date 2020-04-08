@@ -85,7 +85,7 @@ module MyPrecious
       common_program_args(parser, args)
       
       parser.on(
-        '-r', '--requirements-file=FILE',
+        '-r', '--requirements-file FILE',
         "requirements.txt-style file to read"
       ) do |file|
         if args.requirements_file
@@ -107,7 +107,7 @@ module MyPrecious
       if req_file.nil? || !req_file.exist?
         invalid_args!("Unable to guess requirement file name; specify with '-r FILE' option.")
       end
-      pkgs = PyPackageInfo.each_installed_package(req_file)
+      pkgs = PyPackageInfo::Reader.new(req_file).each_installed_package
       
       out_fpath.open('w') do |outf|
         # Header

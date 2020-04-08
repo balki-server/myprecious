@@ -28,272 +28,6 @@ module MyPrecious
       git+ssh
     ]
     
-    ##
-    # Enumerate Python packages required or constrained in a project
-    #
-    # +packages_fpath+ should refer to a pip requirements.txt-style file
-    #
-    # Yields Hash objects extended with PackageRequirements, where each Hash
-    # has one entry whose key is the name of a package and whose value is an
-    # Array of Requirement objects.
-    #
-    def self.each_package_constrained(packages_fpath, only_constrain: false, &blk)
-      return enum_for(:each_package_constrained, packages_fpath) unless block_given?
-      
-      packages_fpath = Pathname(packages_fpath)
-      
-      continued_line = ''
-      packages_fpath.each_line do |pkg_line|
-        pkg_line = pkg_line.chomp
-        next if /^#/ =~ pkg_line
-        if /(?<=\s)#.*$/ =~ pkg_line
-          pkg_line = pkg_line[0...-$&.length]
-        end
-        
-        # Yes, this _does_ happen after comment lines are skipped :facepalm:
-        if /\\$/ =~ pkg_line
-          continued_line += pkg_line[0..-2]
-          next
-        end
-        pkg_line, continued_line = (continued_line + pkg_line).strip, ''
-        next if pkg_line.empty?
-        
-        process_package_line(packages_fpath, pkg_line, only_constrain: only_constrain, &blk)
-      end
-    end
-    
-    def self.process_package_line(fpath, pkg_line, only_constrain:, &blk)
-      case pkg_line
-      when /^-r (.)$/
-        each_package_constrained(
-          fpath.dirname / $1,
-          only_constrain: only_constrain,
-          &blk
-        )
-      when /^-c (.)$/
-        each_package_constrained(
-          fpath.dirname / $1,
-          only_constrain: true,
-          &blk
-        )
-      when /^-e/
-        warn %Q{#{fpath} lists "editable" package: #{pkg_line}}
-      else
-        parse_tree = begin
-          ReqSpecParser.new.parse(pkg_line)
-        rescue Parslet::ParseFailed
-          if (uri = URI.try_parse(pkg_line)) && ACCEPTED_URI_SCHEMES.include?(uri.scheme)
-            yield_spec_from_uri(fpath, pkg_line, &blk) unless only_constrain
-            return
-          end
-          warn("Unreportable line in #{fpath}: #{pkg_line}")
-          return
-        end
-        
-        # TODO: Better implementation that actually evaluates the marker logic
-        # to determine if this spec applies to our situation
-        spec_applies = !parse_tree.has_key?(:markers)
-        
-        if spec_applies
-          # Transform parse tree into a spec
-          spec = ReqSpecTransform.new.apply_spec(parse_tree)
-          if spec.kind_of?(PackageRequirements)
-            spec.each_pair do |pkg_name, reqs_or_dref|
-              if !reqs_or_dref.kind_of?(URI)
-                reqs_or_dref.each {|r| r.install ||= !only_constrain}
-                yield ({pkg_name => reqs_or_dref}.extend(PackageRequirements))
-              elsif !only_constrain
-                yield_spec_from_uri(fpath, reqs_or_dref.to_s, &blk)
-              end
-            end
-          else
-            warn("Unhandled requirement parse tree: #{explain_parse_tree(parse_tree)}")
-          end
-        end
-      end
-    end
-    
-    def self.explain_parse_tree(parse_tree)
-      case parse_tree
-      when Array
-        "[#{parse_tree.map {|i| "#<#{i.class.name}>"}.join(', ')}]"
-      when Hash
-        "{#{parse_tree.map {|k, v| "#{k.inspect} => #<#{v.class.name}>"}.join(', ')}}"
-      else
-        "#<#{parse_tree.class.name}>"
-      end
-    end
-    
-    def self.yield_spec_from_uri(fpath, pkg_line, &blk)
-      uri = begin
-        URI.parse(pkg_line)
-      rescue URI::InvalidURIError
-        warn("Unable to process package requirement in #{fpath}: #{pkg_line}")
-        return
-      end
-      
-      case uri.scheme
-      when 'git'
-        # uri is a git-clone URL
-        yield_spec_from_git(uri, &blk)
-      when /^git\+/
-        uri = URI.parse(pkg_line[4..-1])
-        # _now_ uri is a git-clone URL
-        yield_spec_from_git(uri, &blk)
-      when 'http', 'https'
-        # uri is a .ZIP package
-        yield_spec_from_zip_uri(uri, &blk)
-      else
-        warn("Unable to process URI package requirement in #{fpath}: #{pkg_line}")
-      end
-    end
-    
-    def self.yield_spec_from_git(uri, &blk)
-      git_url = uri.dup
-      git_url.path, committish = uri.path.split('@', 2)
-      uri_fragment, git_url.fragment = uri.fragment, nil
-      repo_path = CODE_CACHE_DIR.join("git_#{Digest::MD5.hexdigest(git_url.to_s)}.git")
-      
-      CODE_CACHE_DIR.mkpath
-      
-      if repo_path.exist?
-        puts "Fetching #{git_url} to #{repo_path}..."
-        output, status = Open3.capture2('git', '-C', repo_path.to_s, 'fetch',
-          '--tags', 'origin', '+refs/heads/*:refs/heads/*')
-        unless status.success?
-          warn("Failed to fetch 'origin' in #{repo_path}")
-          return
-        end
-      else
-        cmd = ['git', 'clone', '--bare', git_url.to_s, repo_path.to_s]
-        output, status = Open3.capture2(*cmd)
-        unless status.success?
-          warn("Failed to clone #{git_url}")
-          return
-        end
-      end
-      
-      worktree_subdir = 'files'
-      cmd = ['git', '-C', repo_path.to_s, 'worktree', 'add', worktree_subdir, committish || 'HEAD']
-      output, status = Open3.capture2(*cmd)
-      unless status.success?
-        warn("Failed to check out #{committish} in #{repo_path}")
-        return
-      end
-      begin
-        # Look in uri.fragment for "subdirectory"
-        fragment_parts = Hash[URI.decode_www_form(uri.fragment || '')]
-        package_dir = repo_path.join(
-          worktree_subdir,
-          fragment_parts.fetch('subdirectory', '.')
-        )
-        
-        # Run Python code to get package information
-        yield_specs_from_setup_info(package_dir, &blk)
-      ensure
-        cmd = ['git', '-C', repo_path.to_s, 'worktree', 'remove', worktree_subdir]
-        output, status = Open3.capture2(*cmd)
-        unless status.success?
-          warn("Failed to remove worktree 'files' in #{repo_path} (exit code #{status.exitstatus})")
-        end
-      end
-    end
-    
-    def self.yield_spec_from_zip_uri(uri, &blk)
-      puts "Downloading #{uri}"
-      zip_path = CODE_CACHE_DIR.join("zip_#{Digest::MD5.hexdigest(uri.to_s)}")
-      CODE_CACHE_DIR.mkpath
-      uri.open('rb') do |uri_f|
-        Zip::File.open_buffer(uri_f) do |zip_file|
-          zip_file.each do |entry|
-            if entry.name_safe?
-              dest_file = zip_path.join(entry.name.split('/',2)[1])
-              dest_file.dirname.mkpath
-              entry.extract(dest_file.to_s) {:overwrite}
-            else
-              warn("Did not extract #{entry.name} from #{uri}")
-            end
-          end
-        end
-      end
-      
-      # Run Python code to get package information
-      yield_specs_from_setup_info(zip_path, &blk)
-    end
-    
-    def self.yield_specs_from_setup_info(local_copy_fpath, &blk)
-      setup_info = load_setup_info(local_copy_fpath)
-      setup_file = local_copy_fpath.join('setup.py')
-      package_version_line = "#{setup_info['name']}==#{setup_info['version']}"
-      process_package_line(setup_file, package_version_line, only_constrain: false, &blk)
-      (setup_info['install_requires'] || []).each do |dep|
-        process_package_line(setup_file, dep, only_constrain: false, &blk)
-      end
-    end
-    
-    def self.load_setup_info(workdir)
-      cmd = ['python3']
-      python_code = <<~END_OF_PYTHON
-        import json, sys
-        from unittest.mock import patch
-
-        sys.path[0:0] = ['.']
-
-        def capture_setup(**kwargs):
-            capture_setup.captured = kwargs
-
-        with patch('setuptools.setup', capture_setup):
-            import setup
-
-        json.dump(
-          capture_setup.captured,
-          sys.stdout,
-          default=lambda o: "<{}.{}>".format(type(o).__module__, type(o).__qualname__),
-        )
-      END_OF_PYTHON
-      
-      output, status = Dir.chdir(workdir) do
-        Open3.capture2('python3', stdin_data: python_code)
-      end
-      raise "Failed to read setup.py in #{workdir}" unless status.success?
-      JSON.parse(output)
-    end
-    
-    def self.each_installed_package(packages_fpath)
-      return enum_for(:each_installed_package, packages_fpath) unless block_given?
-      
-      package_constraints = {}.extend(PackageRequirements)
-      
-      each_package_constrained(packages_fpath) do |cnstrt|
-        package_constraints += cnstrt
-      end
-      
-      pkg_info = {}
-      to_install = []
-      package_constraints.each_pair do |pkg_name, reqs|
-        next unless reqs.any? {|r| r.install}
-        pkg_info[pkg_name] ||= new(pkg_name, reqs)
-        to_install << pkg_name
-      end
-      
-      while pkg_name = to_install.shift
-        item = pkg_info[pkg_name]
-        item.resolve_version!(package_constraints)
-        yield item
-        
-        # Add any dependencies of item to to_install if they are not yet
-        # in pkg_info
-        item.each_transitive_requirement do |req|
-          package_constraints += req
-          req.keys.reject {|k| pkg_info.has_key?(k)}.each do |dep_name|
-            dep_reqs = req[dep_name]
-            pkg_info[dep_name] = new(dep_name, dep_reqs)
-            to_install << dep_name
-          end
-        end
-      end
-    end
-    
     def self.guess_req_file(fpath)
       COMMON_REQ_FILE_NAMES.find do |fname|
         fpath.join(fname).exist?
@@ -307,27 +41,48 @@ module MyPrecious
       end
     end
     
-    def initialize(name, version_reqs)
+    def initialize(name: nil, version_reqs: [], url: nil, install: false)
       super()
+      if name.nil? and url.nil?
+        raise ArgumentError, "At least one of name: or url: must be specified"
+      end
       @name = name
       @version_reqs = version_reqs
-      dvreq = @version_reqs.find(&:determinative?)
-      @current_version = dvreq && parse_version_str(dvreq.vernum)
+      @url = url.kind_of?(URI) ? url : URI(url)
+      @install = install
+      if pinning_req = self.version_reqs.find(&:determinative?)
+        current_version = pinning_req.vernum
+      end
     end
-    attr_reader :name, :version_reqs
-    #attr_accessor :current_version
+    attr_reader :name, :version_reqs, :url
+    attr_accessor :install
+    alias_method :install?, :install
     
-    def current_version
-      @current_version
+    def direct_reference?
+      !url.nil?
     end
     
-    def current_version=(val)
-      @current_version = val.kind_of?(Version) ? val : parse_version_str(val)
+    def resolve_name!
+      return unless direct_reference?
+      
+      name_from_setup = setup_data['name']
+      if !@name.nil? && @name != name_from_setup
+        warn("Requirement file entry for #{@name} points to archive for #{name_from_setup}")
+      else
+        @name = name_from_setup
+      end
     end
     
-    def resolve_version!(pkg_constraints)
-      # Determine version if @current_version.nil?
-      unless self.current_version
+    def resolve_version!
+      return @current_version if @current_version
+      
+      if direct_reference?
+        # Use setup_data
+        @current_version = parse_version_str(setup_data['version'] || '0a0.dev0')
+      elsif pinning_req = self.version_reqs.find(&:determinative?)
+        @current_version = parse_version_str(pinning_req.vernum)
+      else
+        # Use data from pypi
         puts "Resolving current version of #{name}..."
         if inferred_ver = latest_version_satisfying_reqs
           self.current_version = inferred_ver
@@ -338,16 +93,35 @@ module MyPrecious
       end
     end
     
-    def each_transitive_requirement(&blk)
+    def satisfied_by?(version)
+      version_reqs.all? {|r| r.satisfied_by?(version)}
+    end
+    
+    def incorporate(other_req)
+      if other_req.name != self.name
+        raise ArgumentError, "Cannot incorporate requiremens for #{other_req.name} into #{self.name}"
+      end
+      
+      self.version_reqs.concat(other_req.version_reqs)
+      self.install ||= other_req.install
+      if current_version.nil? && (pinning_req = self.version_reqs.find(&:determinative?))
+        current_version = pinning_req.vernum
+      end
+    end
+    
+    def current_version
+      @current_version
+    end
+    
+    def current_version=(val)
+      @current_version = val.kind_of?(Version) ? val : parse_version_str(val)
+    end
+    
+    def each_transitive_requirement
       return if current_version.nil? || current_version.prerelease?
       transitive_require_info = get_release_info(current_version)['info']['requires_dist']
       (transitive_require_info || []).each do |reqmt_line|
-        PyPackageInfo.process_package_line(
-          nil,
-          reqmt_line,
-          only_constrain: false,
-          &blk
-        )
+        yield(reqmt_line)
       end
     end
     
@@ -379,6 +153,7 @@ module MyPrecious
     
     def latest_version_satisfying_reqs
       versions_with_release.each do |ver, rel_date|
+        return ver if self.satisfied_by?(ver.to_s)
         return ver if version_reqs.all? {|req| req.satisfied_by?(ver.to_s)}
       end
       return nil
@@ -597,47 +372,23 @@ module MyPrecious
     
     class ReqSpecTransform < Parslet::Transform
       rule(:verreq => {op: simple(:o), ver: simple(:v)}) {Requirement.new(o.to_s, v.to_s)}
-      rule(package: simple(:n)) {|c| package_reqs(c[:n].to_s => [Requirement.new('>=', '0a0dev')])}
-      rule(package: simple(:n), verreqs: sequence(:rs)) {|c| package_reqs(c[:n].to_s => c[:rs])}
-      rule(package: simple(:n), url: simple(:url)) do |c|
-        package_reqs(c[:n].to_s => URI.parse(c[:url].to_s).extend(MayNeedInstall))
-      end
-      
-      def self.package_reqs(reqs = {})
-        reqs.dup.extend(PackageRequirements)
-      end
+      rule(package: simple(:n)) {|c| PyPackageInfo.new(name: c[:n].to_s)}
+      rule(package: simple(:n), verreqs: sequence(:rs)) {|c| PyPackageInfo.new(
+        name: c[:n].to_s,
+        version_reqs: c[:rs],
+      )}
+      rule(package: simple(:n), url: simple(:url)) {|c| PyPackageInfo.new(
+        name: c[:n].to_s,
+        url: c[:url].to_s,
+      )}
       
       def apply_spec(ptree)
         norm_ptree = {}
+        # TODO: :extras should be in this list, and we should default them to []
         %i[package verreqs url].each do |c|
           norm_ptree[c] = ptree[c] if ptree.has_key?(c)
         end
         apply(norm_ptree)
-      end
-    end
-    
-    module PackageRequirements
-      def +(rhs)
-        unless rhs.kind_of?(PackageRequirements)
-          raise TypeError, "right hand side of | must be PackageRequirements"
-        end
-        
-        dup.extend(PackageRequirements).tap do |result|
-          rhs.each_pair do |name, reqs|
-            new_reqs = (result[name] || []).concat(reqs)
-            
-            result[name] = new_reqs
-          end
-        end
-      end
-    end
-    
-    module MayNeedInstall
-      attr_accessor :install
-      
-      def self.on(obj, install_value = nil)
-        obj.extend(self) unless obj.kind_of?(self)
-        obj.install = install_value unless install_value.nil?
       end
     end
     
@@ -660,8 +411,6 @@ module MyPrecious
         @vernum = vernum
       end
       attr_reader :op, :vernum
-      
-      include MayNeedInstall
       
       def determinative?
         [:==, :str_equal].include?(op)
@@ -787,8 +536,8 @@ module MyPrecious
           parts << "#{epoch}!" unless epoch == 0
           parts << final.to_s
           parts << "#{@pre[0]}#{@pre[1]}" if @pre
-          parts << "post#{@post}" if @post
-          parts << "dev#{@dev}" if @dev
+          parts << ".post#{@post}" if @post
+          parts << ".dev#{@dev}" if @dev
           parts << "+#{local}" if local
         end.join('')
       end
@@ -908,6 +657,189 @@ module MyPrecious
         end
     end
     
+    class Reader
+      def initialize(packages_fpath, only_constrain: false)
+        super()
+        @files = [Pathname(packages_fpath)]
+        @only_constrain = only_constrain
+      end
+      
+      def each_package_constrained
+        generator = Enumerator.new do |items|
+          continued_line = ''
+          current_file.each_line do |pkg_line|
+            pkg_line = pkg_line.chomp
+            next if /^#/ =~ pkg_line
+            if /(?<=\s)#.*$/ =~ pkg_line
+              pkg_line = pkg_line[0...-$&.length]
+            end
+            
+            # Yes, this _does_ happen after comment lines are skipped :facepalm:
+            if /\\$/ =~ pkg_line
+              continued_line += pkg_line[0..-2]
+              next
+            end
+            pkg_line, continued_line = (continued_line + pkg_line).strip, ''
+            next if pkg_line.empty?
+            
+            process_line_into(items, pkg_line)
+          end
+        end
+        
+        if block_given?
+          generator.each {|item| yield item}
+        else
+          generator
+        end
+      end
+      
+      def each_installed_package
+        generator = Enumerator.new do |items|
+          packages = {}
+          
+          each_package_constrained do |pkg|
+            pkg.resolve_name!
+            if packages.has_key?(pkg.name)
+              packages[pkg.name].incorporate(pkg)
+            else
+              packages[pkg.name] = pkg
+            end
+          end
+          
+          to_install = []
+          packages.each_value do |pkg|
+            next unless pkg.install?
+            to_install << pkg.name
+          end
+          
+          while pkg_name = to_install.shift
+            pkg = packages[pkg_name]
+            pkg.resolve_version!
+            items << pkg
+            
+            transitive_reqs = []
+            pkg.each_transitive_requirement do |reqmt_line|
+              insert_package_from_line_into(transitive_reqs, reqmt_line)
+            end
+            
+            transitive_reqs.each do |req|
+              # Transitive requirements come from setup.py (possibly indirectly
+              # through pypi), so they can't have direct or URI-only
+              # requirements; therefore, no need to call #resolve_name!
+              if reqd_pkg = packages[req.name]
+                if reqd_pkg.current_version.nil? || req.satisfied_by?(reqd_pkg.current_version)
+                  reqd_pkg.incorporate(req)
+                else
+                  warn("#{pkg.name} requires a version of #{reqd_pkg.name} other than #{reqd_pkg.current_version} (selected by an earlier constraint)")
+                end
+              else
+                packages[req.name] = req
+                to_install << req.name
+              end
+            end
+          end
+        end
+        
+        if block_given?
+          generator.each {|item| yield item}
+        else
+          generator
+        end
+      end
+      
+      private
+        def current_file
+          @files.last
+        end
+        
+        def in_file(fpath)
+          @files << Pathname(fpath)
+          begin
+            yield
+          ensure
+            @files.pop
+          end
+        end
+        
+        def only_constrain?
+          @only_constrain
+        end
+        
+        def reading_constraints
+          prev_val, @only_constrain = @only_constrain, true
+          begin
+            yield
+          ensure
+            @only_constrain = prev_val
+          end
+        end
+        
+        def process_line_into(items, pkg_line)
+          case pkg_line
+          when /^-r (.)$/
+            if only_constrain?
+              warn("-r directive appears in constraints file #{current_file}")
+            end
+            in_file(current_file.dirname / $1) do
+              each_package_constrained {|pkg| items << pkg}
+            end
+          when /^-c (.)$/
+            in_file(current_file.dirname / $1) do
+              reading_constraints do
+                each_package_constrained {|pkg| items << pkg}
+              end
+            end
+          when /^-e/
+            warn %Q{#{current_file} lists "editable" package: #{pkg_line}}
+          else
+            insert_package_from_line_into(items, pkg_line)
+          end
+        end
+        
+        def insert_package_from_line_into(items, pkg_line)
+          parse_tree = begin
+            ReqSpecParser.new.parse(pkg_line)
+          rescue Parslet::ParseFailed
+            if (uri = URI.try_parse(pkg_line)) && ACCEPTED_URI_SCHEMES.include?(uri.scheme)
+              if only_constrain?
+                warn("#{current_file} is a constraints file but specifies URL #{uri}")
+              else
+                items << PyPackageInfo.new(url: uri, install: true)
+              end
+              return
+            end
+            warn("Unreportable line in #{current_file}: #{pkg_line}")
+            return
+          end
+          
+          # TODO: Better implementation that actually evaluates the marker logic
+          # to determine if this spec applies to our situation
+          spec_applies = !parse_tree.has_key?(:markers)
+          
+          if spec_applies
+            # Transform parse tree into a spec
+            spec = ReqSpecTransform.new.apply_spec(parse_tree)
+            if spec.kind_of?(PyPackageInfo)
+              spec.install ||= !only_constrain?
+              items << spec
+            else
+              warn("Unhandled requirement parse tree: #{explain_parse_tree parse_tree}")
+            end
+          end
+        end
+        
+        def explain_parse_tree(parse_tree)
+          case parse_tree
+          when Array
+            "[#{parse_tree.map {|i| "#<#{i.class.name}>"}.join(', ')}]"
+          when Hash
+            "{#{parse_tree.map {|k, v| "#{k.inspect} => #<#{v.class.name}>"}.join(', ')}}"
+          else
+            "#<#{parse_tree.class.name}>"
+          end
+        end
+    end
+    
     def pypi_url
       "https://pypi.python.org/pypi/#{name}/json"
     end
@@ -943,6 +875,148 @@ module MyPrecious
       def nonpatch_versegs(ver)
         return nil if ver.nil?
         [ver.epoch] + ver.final.take(2)
+      end
+      
+      def setup_data
+        return @setup_data if defined? @setup_data
+        unless self.url
+          raise "#setup_data called for #{name}, may only be called for packages specified by URL"
+        end
+        
+        python_code = <<~END_OF_PYTHON
+          import json, sys
+          from unittest.mock import patch
+
+          sys.path[0:0] = ['.']
+
+          def capture_setup(**kwargs):
+              capture_setup.captured = kwargs
+
+          with patch('setuptools.setup', capture_setup):
+              import setup
+
+          json.dump(
+            capture_setup.captured,
+            sys.stdout,
+            default=lambda o: "<{}.{}>".format(type(o).__module__, type(o).__qualname__),
+          )
+        END_OF_PYTHON
+        
+        output, status = with_package_files do |workdir|
+          Dir.chdir(workdir) do
+            Open3.capture2('python3', stdin_data: python_code)
+          end
+        end || []
+        
+        @setup_data = begin
+          case status
+          when nil
+            warn("Package files unavailable, could not read setup.py")
+            {}
+          when :success?.to_proc
+            JSON.parse(output)
+          else
+            warn("Failed to read setup.py in for #{self.url}")
+            {}
+          end
+        rescue StandardError => ex
+          warn("Failed to read setup.py in for #{self.url}: #{ex}")
+          {}
+        end
+      end
+      
+      def with_package_files(&blk)
+        case self.url.scheme
+        when 'git'
+          return with_git_worktree(self.url, &blk)
+        when /^git\+/
+          git_uri = self.url.dup
+          git_uri.scheme = self.url.scheme[4..-1]
+          return with_git_worktree(git_uri, &blk)
+        when 'http', 'https'
+          # self.url is a .ZIP package
+          return with_unzipped_files(&blk)
+        else
+          warn("Unable to process URI package requirement: #{self.url}")
+        end
+      end
+      
+      def with_git_worktree(uri)
+        git_url = uri.dup
+        git_url.path, committish = uri.path.split('@', 2)
+        uri_fragment, git_url.fragment = uri.fragment, nil
+        repo_path = CODE_CACHE_DIR.join("git_#{Digest::MD5.hexdigest(git_url.to_s)}.git")
+        
+        CODE_CACHE_DIR.mkpath
+        
+        in_dir_git_cmd = ['git', '-C', repo_path.to_s]
+        
+        if repo_path.exist?
+          puts "Fetching #{git_url} to #{repo_path}..."
+          cmd = in_dir_git_cmd + ['fetch', '--tags', 'origin', '+refs/heads/*:refs/heads/*']
+          output, status = Open3.capture2(*cmd)
+          unless status.success?
+            warn("Failed to fetch 'origin' in #{repo_path}")
+            return
+          end
+        else
+          cmd = ['git', 'clone', '--bare', git_url.to_s, repo_path.to_s]
+          output, status = Open3.capture2(*cmd)
+          unless status.success?
+            warn("Failed to clone #{git_url}")
+            return
+          end
+        end
+        
+        worktree_subdir = 'files'
+        committish ||= 'HEAD'
+        cmd = in_dir_git_cmd + ['worktree', 'add', worktree_subdir, committish]
+        output, status = Open3.capture2(*cmd)
+        unless status.success?
+          warn("Failed to check out #{committish} in #{repo_path}")
+          return
+        end
+        begin
+          fragment_parts = Hash[URI.decode_www_form(uri.fragment || '')]
+          package_dir = repo_path.join(
+            worktree_subdir,
+            fragment_parts.fetch('subdirectory', '.')
+          )
+          
+          return (yield package_dir)
+        ensure
+          cmd = in_dir_git_cmd + ['worktree', 'remove', worktree_subdir]
+          output, status = Open3.capture2(*cmd)
+          unless status.success?
+            warn("Failed to remove worktree #{worktree_subdir.inspect} in #{repo_path} (exit code #{status.exitstatus})")
+          end
+        end
+      end
+      
+      def with_unzipped_files
+        puts "Downloading #{self.url}"
+        zip_path = CODE_CACHE_DIR.join("zip_#{Digest::MD5.hexdigest(self.url.to_s)}")
+        CODE_CACHE_DIR.mkpath
+        
+        if %w[http https].include?(self.url.scheme)
+          # TODO: Make a HEAD request to see if re-download is necessary
+        end
+        
+        self.url.open('rb') do |url_f|
+          Zip::File.open_buffer(url_f) do |zip_file|
+            zip_file.each do |entry|
+              if entry.name_safe?
+                dest_file = zip_path.join(entry.name.split('/', 2)[1])
+                dest_file.dirname.mkpath
+                entry.extract(dest_file.to_s) {:overwrite}
+              else
+                warn("Did not extract #{entry.name} from #{self.url}")
+              end
+            end
+          end
+        end
+        
+        return (yield zip_path)
       end
   end
 end
