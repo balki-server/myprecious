@@ -68,12 +68,14 @@ module MyPrecious
         each_package_constrained(
           fpath.dirname / $1,
           only_constrain: only_constrain,
-        ) {|pkg| yield pkg}
+          &blk
+        )
       when /^-c (.)$/
         each_package_constrained(
           fpath.dirname / $1,
           only_constrain: true,
-        ) {|cstrt| yield cstrt}
+          &blk
+        )
       when /^-e/
         warn %Q{#{fpath} lists "editable" package: #{pkg_line}}
       else
@@ -96,9 +98,14 @@ module MyPrecious
           # Transform parse tree into a spec
           spec = ReqSpecTransform.new.apply_spec(parse_tree)
           if spec.kind_of?(PackageRequirements)
-            spec.values.each {|rs| rs.each {|r| r.install ||= !only_constrain}}
-            #require 'rb-readline'; require 'byebug'; byebug
-            yield spec
+            spec.each_pair do |pkg_name, reqs_or_dref|
+              if !reqs_or_dref.kind_of?(URI)
+                reqs_or_dref.each {|r| r.install ||= !only_constrain}
+                yield ({pkg_name => reqs_or_dref}.extend(PackageRequirements))
+              elsif !only_constrain
+                yield_spec_from_uri(fpath, reqs_or_dref.to_s, &blk)
+              end
+            end
           else
             warn("Unhandled requirement parse tree: #{explain_parse_tree(parse_tree)}")
           end
@@ -141,30 +148,73 @@ module MyPrecious
       end
     end
     
-    def self.yield_spec_from_git(uri)
-      warn("Unable to process Git package requirement: #{uri}")
-      return
-      
-      path, committish = uri.path.split('@', 2)
-      git_url = "#{uri.scheme}://#{uri.host}#{path}"
-      repo_path = CODE_CACHE_DIR.join("git_#{Digest::MD5.hexdigest(git_url)}")
+    def self.yield_spec_from_git(uri, &blk)
+      git_url = uri.dup
+      git_url.path, committish = uri.path.split('@', 2)
+      uri_fragment, git_url.fragment = uri.fragment, nil
+      repo_path = CODE_CACHE_DIR.join("git_#{Digest::MD5.hexdigest(git_url.to_s)}.git")
       
       CODE_CACHE_DIR.mkpath
       
-      cmd = ['git', 'clone']
-      cmd.push('-n') if committish
-      cmd.push(git_url, repo_path)
-      # TODO: Run cmd
-      
-      if committish
-        cmd = ['git', '-C', repo_path, 'checkout', committish]
-        # TODO: Run cmd
+      if repo_path.exist?
+        puts "Fetching #{git_url} to #{repo_path}..."
+        output, status = Open3.capture2('git', '-C', repo_path.to_s, 'fetch',
+          '--tags', 'origin', '+refs/heads/*:refs/heads/*')
+        unless status.success?
+          warn("Failed to fetch 'origin' in #{repo_path}")
+          return
+        end
+      else
+        cmd = ['git', 'clone', '--bare', git_url.to_s, repo_path.to_s]
+        output, status = Open3.capture2(*cmd)
+        unless status.success?
+          warn("Failed to clone #{git_url}")
+          return
+        end
       end
       
-      # TODO: Run Python code to print out the requirement line
+      worktree_subdir = 'files'
+      cmd = ['git', '-C', repo_path.to_s, 'worktree', 'add', worktree_subdir, committish || 'HEAD']
+      output, status = Open3.capture2(*cmd)
+      unless status.success?
+        warn("Failed to check out #{committish} in #{repo_path}")
+        return
+      end
+      begin
+        # Look in uri.fragment for "subdirectory"
+        fragment_parts = Hash[URI.decode_www_form(uri.fragment || '')]
+        package_dir = repo_path.join(
+          worktree_subdir,
+          fragment_parts.fetch('subdirectory', '.')
+        )
+        
+        # Run Python code to get package information
+        setup_info = load_setup_info(package_dir)
+        process_package_line(
+          package_dir.join('setup.py'),
+          "#{setup_info['name']}==#{setup_info['version']}",
+          only_constrain: false,
+          &blk
+        )
+        (setup_info['install_requires'] || []).each do |dep|
+          process_package_line(
+            package_dir.join('setup.py'),
+            dep,
+            only_constrain: false,
+            &blk
+          )
+        end
+      ensure
+        cmd = ['git', '-C', repo_path.to_s, 'worktree', 'remove', worktree_subdir]
+        output, status = Open3.capture2(*cmd)
+        unless status.success?
+          warn("Failed to remove worktree 'files' in #{repo_path} (exit code #{status.exitstatus})")
+        end
+      end
     end
     
     def self.yield_spec_from_zip_uri(uri, &blk)
+      puts "Downloading #{uri}"
       zip_path = CODE_CACHE_DIR.join("zip_#{Digest::MD5.hexdigest(uri.to_s)}")
       CODE_CACHE_DIR.mkpath
       uri.open('rb') do |uri_f|
@@ -230,10 +280,10 @@ module MyPrecious
     def self.each_installed_package(packages_fpath)
       return enum_for(:each_installed_package, packages_fpath) unless block_given?
       
-      package_constraints = nil
+      package_constraints = {}.extend(PackageRequirements)
       
       each_package_constrained(packages_fpath) do |cnstrt|
-        package_constraints = package_constraints ? (package_constraints + cnstrt) : cnstrt
+        package_constraints += cnstrt
       end
       
       pkg_info = {}
@@ -412,7 +462,14 @@ module MyPrecious
     end
     
     def days_between_current_and_recommended
-      v, cv_rel = versions_with_release.find {|v, r| v == current_version} || []
+      v, cv_rel = versions_with_release.find do |v, r|
+        case 
+        when current_version.prerelease?
+          v < current_version
+        else
+          v == current_version
+        end
+      end || []
       v, rv_rel = versions_with_release.find {|v, r| v == recommended_version} || []
       return nil if cv_rel.nil? || rv_rel.nil?
       
