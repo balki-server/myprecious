@@ -189,21 +189,7 @@ module MyPrecious
         )
         
         # Run Python code to get package information
-        setup_info = load_setup_info(package_dir)
-        process_package_line(
-          package_dir.join('setup.py'),
-          "#{setup_info['name']}==#{setup_info['version']}",
-          only_constrain: false,
-          &blk
-        )
-        (setup_info['install_requires'] || []).each do |dep|
-          process_package_line(
-            package_dir.join('setup.py'),
-            dep,
-            only_constrain: false,
-            &blk
-          )
-        end
+        yield_specs_from_setup_info(package_dir, &blk)
       ensure
         cmd = ['git', '-C', repo_path.to_s, 'worktree', 'remove', worktree_subdir]
         output, status = Open3.capture2(*cmd)
@@ -232,20 +218,16 @@ module MyPrecious
       end
       
       # Run Python code to get package information
-      setup_info = load_setup_info(zip_path)
-      process_package_line(
-        zip_path.join('setup.py'),
-        "#{setup_info['name']}==#{setup_info['version']}",
-        only_constrain: false,
-        &blk
-      )
+      yield_specs_from_setup_info(zip_path, &blk)
+    end
+    
+    def self.yield_specs_from_setup_info(local_copy_fpath, &blk)
+      setup_info = load_setup_info(local_copy_fpath)
+      setup_file = local_copy_fpath.join('setup.py')
+      package_version_line = "#{setup_info['name']}==#{setup_info['version']}"
+      process_package_line(setup_file, package_version_line, only_constrain: false, &blk)
       (setup_info['install_requires'] || []).each do |dep|
-        process_package_line(
-          zip_path.join('setup.py'),
-          dep,
-          only_constrain: false,
-          &blk
-        )
+        process_package_line(setup_file, dep, only_constrain: false, &blk)
       end
     end
     
