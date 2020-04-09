@@ -814,11 +814,11 @@ module MyPrecious
     end
     
     def pypi_url
-      "https://pypi.python.org/pypi/#{name}/json"
+      "https://pypi.org/pypi/#{name}/json"
     end
     
     def pypi_release_url(release)
-      "https://pypi.python.org/pypi/#{name}/#{release}/json"
+      "https://pypi.org/pypi/#{name}/#{release}/json"
     end
     
     private
