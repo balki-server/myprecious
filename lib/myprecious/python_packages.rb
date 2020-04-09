@@ -785,19 +785,13 @@ module MyPrecious
             return
           end
           
-          # TODO: Better implementation that actually evaluates the marker logic
-          # to determine if this spec applies to our situation
-          spec_applies = !parse_tree.has_key?(:markers)
-          
-          if spec_applies
-            # Transform parse tree into a spec
-            spec = ReqSpecTransform.new.apply_spec(parse_tree)
-            if spec.kind_of?(PyPackageInfo)
-              spec.install ||= !only_constrain?
-              items << spec
-            else
-              warn("Unhandled requirement parse tree: #{explain_parse_tree parse_tree}")
-            end
+          # Transform parse tree into a spec
+          spec = ReqSpecTransform.new.apply_spec(parse_tree)
+          if spec.kind_of?(PyPackageInfo)
+            spec.install ||= !only_constrain?
+            items << spec
+          else
+            warn("Unhandled requirement parse tree: #{explain_parse_tree parse_tree}")
           end
         end
         
