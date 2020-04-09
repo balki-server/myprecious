@@ -48,7 +48,7 @@ module MyPrecious
       end
       @name = name
       @version_reqs = version_reqs
-      @url = url.kind_of?(URI) ? url : URI(url)
+      @url = url && URI(url)
       @install = install
       if pinning_req = self.version_reqs.find(&:determinative?)
         current_version = pinning_req.vernum
@@ -99,7 +99,7 @@ module MyPrecious
     
     def incorporate(other_req)
       if other_req.name != self.name
-        raise ArgumentError, "Cannot incorporate requiremens for #{other_req.name} into #{self.name}"
+        raise ArgumentError, "Cannot incorporate requirements for #{other_req.name} into #{self.name}"
       end
       
       self.version_reqs.concat(other_req.version_reqs)
@@ -115,14 +115,6 @@ module MyPrecious
     
     def current_version=(val)
       @current_version = val.kind_of?(Version) ? val : parse_version_str(val)
-    end
-    
-    def each_transitive_requirement
-      return if current_version.nil? || current_version.prerelease?
-      transitive_require_info = get_release_info(current_version)['info']['requires_dist']
-      (transitive_require_info || []).each do |reqmt_line|
-        yield(reqmt_line)
-      end
     end
     
     def versions_with_release
@@ -716,27 +708,6 @@ module MyPrecious
             pkg = packages[pkg_name]
             pkg.resolve_version!
             items << pkg
-            
-            transitive_reqs = []
-            pkg.each_transitive_requirement do |reqmt_line|
-              insert_package_from_line_into(transitive_reqs, reqmt_line)
-            end
-            
-            transitive_reqs.each do |req|
-              # Transitive requirements come from setup.py (possibly indirectly
-              # through pypi), so they can't have direct or URI-only
-              # requirements; therefore, no need to call #resolve_name!
-              if reqd_pkg = packages[req.name]
-                if reqd_pkg.current_version.nil? || req.satisfied_by?(reqd_pkg.current_version)
-                  reqd_pkg.incorporate(req)
-                else
-                  warn("#{pkg.name} requires a version of #{reqd_pkg.name} other than #{reqd_pkg.current_version} (selected by an earlier constraint)")
-                end
-              else
-                packages[req.name] = req
-                to_install << req.name
-              end
-            end
           end
         end
         
@@ -968,8 +939,15 @@ module MyPrecious
           end
         end
         
-        worktree_subdir = 'files'
-        committish ||= 'HEAD'
+        committish ||= (
+          cmd = in_dir_git_cmd + ['ls-remote', 'origin', 'HEAD']
+          output, status = Open3.capture2(*cmd)
+          unless status.success?
+            raise "Unable to read the HEAD of orgin"
+          end
+          output.split("\t")[0]
+        )
+        worktree_subdir = "files_#{Digest::MD5.hexdigest(committish)}"
         cmd = in_dir_git_cmd + ['worktree', 'add', worktree_subdir, committish]
         output, status = Open3.capture2(*cmd)
         unless status.success?
