@@ -5,6 +5,7 @@ require 'open-uri'
 require 'open3'
 require 'parslet'
 require 'rest-client'
+require 'rubygems/package'
 require 'shellwords'
 require 'tmpdir'
 require 'zip'
@@ -901,8 +902,15 @@ module MyPrecious
           git_uri.scheme = self.url.scheme[4..-1]
           return with_git_worktree(git_uri, &blk)
         when 'http', 'https'
-          # self.url is a .ZIP package
-          return with_unzipped_files(&blk)
+          case
+          when zip_url?
+            return with_unzipped_files(&blk)
+          when tgz_url?
+            return with_untarred_files(&blk)
+          else
+            warn("Unknown archive type for URL: #{self.url}")
+            return nil
+          end
         else
           warn("Unable to process URI package requirement: #{self.url}")
         end
@@ -967,16 +975,25 @@ module MyPrecious
         end
       end
       
-      def with_unzipped_files
-        puts "Downloading #{self.url}"
-        zip_path = CODE_CACHE_DIR.join("zip_#{Digest::MD5.hexdigest(self.url.to_s)}")
-        CODE_CACHE_DIR.mkpath
-        
-        if %w[http https].include?(self.url.scheme)
-          # TODO: Make a HEAD request to see if re-download is necessary
+      def get_url_content_type
+        # TODO: Make a HEAD request to the URL to find out the content type
+        return 'application/octet-stream'
+      end
+      
+      def zip_url?
+        case get_url_content_type
+        when 'application/zip' then true
+        when 'application/octet-stream'
+          self.url.path.downcase.end_with?('.zip')
+        else false
         end
-        
-        self.url.open('rb') do |url_f|
+      end
+      
+      ##
+      # Implementation of #with_package_files for ZIP file URLs
+      #
+      def with_unzipped_files
+        zip_path = extracted_url("zip") do |url_f, zip_path|
           Zip::File.open_buffer(url_f) do |zip_file|
             zip_file.each do |entry|
               if entry.name_safe?
@@ -991,6 +1008,54 @@ module MyPrecious
         end
         
         return (yield zip_path)
+      end
+      
+      def tgz_url?
+        case get_url_content_type
+        when %r{^application/(x-tar(\+gzip)?|gzip)$} then true
+        when 'application/octet-stream'
+          !!(self.url.path.downcase =~ /\.(tar\.gz|tgz)$/)
+        else false
+        end
+      end
+      
+      ##
+      # Implementation of #with_package_files for TGZ file URLs
+      #
+      def with_untarred_files
+        tar_path = extracted_url("tar") do |url_f, tar_path|
+          Gem::Package::TarReader.new(Zlib::GzipReader.new(url_f)) do |tar_file|
+            tar_file.each do |entry|
+              if entry.full_name =~ %r{(^|/)\.\./}
+                warn("Did not extract #{entry.name} from #{self.url}")
+              elsif entry.file?
+                dest_file = tar_path.join(entry.full_name.split('/', 2)[1])
+                dest_file.dirname.mkpath
+                dest_file.open('wb') do |df|
+                  IO.copy_stream(entry, df)
+                end
+              end
+            end
+          end
+        end
+        
+        return (yield tar_path)
+      end
+      
+      def extracted_url(archive_type, &blk)
+        puts "Downloading #{self.url}"
+        extraction_path = CODE_CACHE_DIR.join(
+          "#{archive_type}_#{Digest::MD5.hexdigest(self.url.to_s)}"
+        )
+        CODE_CACHE_DIR.mkpath
+        
+        if %w[http https].include?(self.url.scheme)
+          # TODO: Make a HEAD request to see if re-download is necessary
+        end
+        
+        self.url.open('rb') {|url_f| yield url_f, extraction_path}
+        
+        return extraction_path
       end
   end
 end
