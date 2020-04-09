@@ -5,6 +5,8 @@ require 'open-uri'
 require 'open3'
 require 'parslet'
 require 'rest-client'
+require 'shellwords'
+require 'tmpdir'
 require 'zip'
 
 module MyPrecious
@@ -947,27 +949,27 @@ module MyPrecious
           end
           output.split("\t")[0]
         )
-        worktree_subdir = "files_#{Digest::MD5.hexdigest(committish)}"
-        cmd = in_dir_git_cmd + ['worktree', 'add', worktree_subdir, committish]
-        output, status = Open3.capture2(*cmd)
-        unless status.success?
-          warn("Failed to check out #{committish} in #{repo_path}")
-          return
-        end
-        begin
+        Dir.mktmpdir("myprecious-git-") do |workdir|
+          cmds = [
+            in_dir_git_cmd + ['archive', committish],
+            ['tar', '-x', '-C', workdir.to_s],
+          ]
+          statuses = Open3.pipeline(*cmds, in: :close)
+          if failed_i = statuses.find {|s| s.exited? && !s.success?}
+            exitstatus = statuses[failed_i].exitstatus
+            failed_cmd_str = cmds[failed_i].shelljoin
+            warn(
+              "Failed to create temporary folder at command:\n" +
+              "    #{failed_cmd.light_red} (exited with code #{exitstatus})"
+            )
+            return
+          end
+          
           fragment_parts = Hash[URI.decode_www_form(uri.fragment || '')]
-          package_dir = repo_path.join(
-            worktree_subdir,
+          package_dir = Pathname(workdir).join(
             fragment_parts.fetch('subdirectory', '.')
           )
-          
           return (yield package_dir)
-        ensure
-          cmd = in_dir_git_cmd + ['worktree', 'remove', worktree_subdir]
-          output, status = Open3.capture2(*cmd)
-          unless status.success?
-            warn("Failed to remove worktree #{worktree_subdir.inspect} in #{repo_path} (exit code #{status.exitstatus})")
-          end
         end
       end
       
