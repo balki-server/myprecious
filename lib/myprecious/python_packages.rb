@@ -31,12 +31,21 @@ module MyPrecious
       git+ssh
     ]
     
+    ##
+    # Guess the name of the requirements file in the given directory
+    #
+    # Best effort (currently, consulting a static list of likely file names for
+    # existence), and may return +nil+.
+    #
     def self.guess_req_file(fpath)
       COMMON_REQ_FILE_NAMES.find do |fname|
         fpath.join(fname).exist?
       end
     end
     
+    ##
+    # Get an appropriate, human friendly column title for an attribute
+    #
     def self.col_title(attr)
       case attr
       when :name then 'Package'
@@ -44,6 +53,11 @@ module MyPrecious
       end
     end
     
+    ##
+    # Construct an instance
+    #
+    # At least one of the keywords +name:+ or +url:+ _MUST_ be provided.
+    #
     def initialize(name: nil, version_reqs: [], url: nil, install: false)
       super()
       if name.nil? and url.nil?
@@ -61,10 +75,18 @@ module MyPrecious
     attr_accessor :install
     alias_method :install?, :install
     
+    ##
+    # Was this requirement specified as a direct reference to a URL providing
+    # the package?
+    #
     def direct_reference?
       !url.nil?
     end
     
+    ##
+    # For packages specified without a name, do what is necessary to find the
+    # name
+    #
     def resolve_name!
       return unless direct_reference?
       
@@ -76,6 +98,10 @@ module MyPrecious
       end
     end
     
+    ##
+    # For requirements not deterministically specifying a version, determine
+    # which version would be installed
+    #
     def resolve_version!
       return @current_version if @current_version
       
@@ -96,10 +122,20 @@ module MyPrecious
       end
     end
     
+    ##
+    # Test if the version constraints on this package are satisfied by the
+    # given version
+    #
+    # All current version requirements are in #version_reqs.
+    #
     def satisfied_by?(version)
       version_reqs.all? {|r| r.satisfied_by?(version)}
     end
     
+    ##
+    # Incorporate the requirements for this package specified in another object
+    # into this instance
+    #
     def incorporate(other_req)
       if other_req.name != self.name
         raise ArgumentError, "Cannot incorporate requirements for #{other_req.name} into #{self.name}"
@@ -120,6 +156,15 @@ module MyPrecious
       @current_version = val.kind_of?(Version) ? val : parse_version_str(val)
     end
     
+    ##
+    # An Array of Arrays containing version (MyPrecious::PyPackageInfo::Version
+    # or String) and release date (Time)
+    #
+    # The returned Array is sorted in order of descending version number, with
+    # strings not conforming to PEP-440 sorted lexicographically following all
+    # PEP-440 conformant versions, the latter presented as
+    # MyPrecious::PyPackageInfo::Version objects.
+    #
     def versions_with_release
       @versions ||= begin
         all_releases = get_package_info.fetch('releases', {})
@@ -154,6 +199,9 @@ module MyPrecious
       return nil
     end
     
+    ##
+    # Age in days of the current version
+    #
     def age
       return @age if defined? @age
       @age = get_age
@@ -167,6 +215,11 @@ module MyPrecious
       versions_with_release[0][1]
     end
     
+    ##
+    # Version number recommended based on stability criteria
+    #
+    # May return +nil+ if no version meets the established criteria
+    #
     def recommended_version
       return nil if versions_with_release.empty?
       return @recommended_version if defined? @recommended_version
@@ -254,7 +307,9 @@ module MyPrecious
       end
     end
     
-    # Parses based on grammar in PEP 508 (https://www.python.org/dev/peps/pep-0508/#complete-grammar)
+    ##
+    # Parses requirement line based on grammar in PEP 508
+    # (https://www.python.org/dev/peps/pep-0508/#complete-grammar)
     #
     class ReqSpecParser < Parslet::Parser
       COMPARATORS = %w[<= < != === == >= > ~=]
@@ -365,6 +420,9 @@ module MyPrecious
       rule(:sub_delims) { match["!$&'()*+,;="] }
     end
     
+    ##
+    # Transforms parse tree from ReqSpecParser to usable objects
+    #
     class ReqSpecTransform < Parslet::Transform
       rule(:verreq => {op: simple(:o), ver: simple(:v)}) {Requirement.new(o.to_s, v.to_s)}
       rule(package: simple(:n)) {|c| PyPackageInfo.new(name: c[:n].to_s)}
@@ -377,6 +435,12 @@ module MyPrecious
         url: c[:url].to_s,
       )}
       
+      ##
+      # Apply transform after normalizing a parse tree
+      #
+      # This method should be applied only to a parse tree expected to come
+      # from a requirement specification.
+      #
       def apply_spec(ptree)
         norm_ptree = {}
         # TODO: :extras should be in this list, and we should default them to []
@@ -387,6 +451,9 @@ module MyPrecious
       end
     end
     
+    ##
+    # Representation of a single requirement clause
+    #
     class Requirement
       def initialize(op, vernum)
         super()
@@ -505,6 +572,9 @@ module MyPrecious
     extend VersionParsing
     include VersionParsing
     
+    ##
+    # Represents a full PEP-440 version
+    #
     class Version
       NOT_PRE = ['z', 0]
       
@@ -596,6 +666,9 @@ module MyPrecious
         end
     end
     
+    ##
+    # Represents the "final" part of a PEP-440 version string
+    #
     class FinalVersion
       def initialize(final_ver)
         @value = case final_ver
@@ -652,6 +725,9 @@ module MyPrecious
         end
     end
     
+    ##
+    # Reads package requirements from a file
+    #
     class Reader
       def initialize(packages_fpath, only_constrain: false)
         super()
@@ -659,6 +735,16 @@ module MyPrecious
         @only_constrain = only_constrain
       end
       
+      ##
+      # Enumerate packages described by requirements targeted by this instance
+      #
+      # Each invocation of the block receives a PyPackageInfo object, which
+      # will have, at minimum, either a #name or #url not +nil+.  It is
+      # possible that multiple iterations will process separate PyPackageInfo
+      # for the same package, in which case PyPackageInfo#incorporate is useful.
+      #
+      # An Enumerator is returned if no block is given.
+      #
       def each_package_constrained
         generator = Enumerator.new do |items|
           continued_line = ''
@@ -688,6 +774,15 @@ module MyPrecious
         end
       end
       
+      ##
+      # Enumerate packages targeted for installation by this instance
+      #
+      # Each invocation of the block receives a PyPackageInfo object targeted
+      # for installation.  Each of these PyPackageInfo object will have a
+      # resolved #name and #current_version (if possible).
+      #
+      # An Enumerator is returned if no block is given.
+      #
       def each_installed_package
         generator = Enumerator.new do |items|
           packages = {}
@@ -840,11 +935,20 @@ module MyPrecious
         return nil
       end
       
+      ##
+      # Given a version, return the parts that we expect to define the
+      # major/minor release series
+      #
+      # Returns an Array
+      #
       def nonpatch_versegs(ver)
         return nil if ver.nil?
         [ver.epoch] + ver.final.take(2)
       end
       
+      ##
+      # Get data from the setup.py file of the package
+      #
       def setup_data
         return @setup_data if defined? @setup_data
         unless self.url
@@ -893,6 +997,13 @@ module MyPrecious
         end
       end
       
+      ##
+      # Yield a Pathname for the directory containing the package files
+      #
+      # Returns the result of the block, or +nil+ if the block is not
+      # executed.  The directory with the package files may be removed when
+      # the block exits.
+      #
       def with_package_files(&blk)
         case self.url.scheme
         when 'git'
@@ -916,6 +1027,9 @@ module MyPrecious
         end
       end
       
+      ##
+      # Implementation of #with_package_files for git URIs
+      #
       def with_git_worktree(uri)
         git_url = uri.dup
         git_url.path, committish = uri.path.split('@', 2)
