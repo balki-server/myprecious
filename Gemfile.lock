@@ -33,7 +33,7 @@ GEM
       coderay (~> 1.1)
       method_source (~> 1.0)
     rake (13.0.1)
-    rake-toolkit_program (0.1.1)
+    rake-toolkit_program (0.1.2)
       colorize (~> 0.8)
       dedent (~> 1.0)
       rake (>= 10.0)
