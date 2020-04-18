@@ -1,12 +1,13 @@
+require 'rake'
 Gem::Specification.new do |s|
   s.name        = 'myprecious'
-  s.version     = '0.1.0'
+  s.version     = '0.1.2'
   s.date        = '2020-04-17'
   s.summary     = "Your precious dependencies!"
   s.description = "A simple, markdown generated with information about your gems and python packages"
   s.authors     = ["Balki Kodarapu"]
   s.email       = 'balki.kodarapu@gmail.com'
-  s.files       = ["lib/myprecious.rb"]
+  s.files       = FileList["lib/**/*.rb"].to_a
   s.executables << 'myprecious'
   s.add_runtime_dependency 'gems', '~> 1.0', '>= 1.0.0'
   s.add_runtime_dependency 'git', '~> 1.5', '>= 1.5.0'
