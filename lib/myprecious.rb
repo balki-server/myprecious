@@ -541,10 +541,16 @@ module MyPrecious
     # Get a CSS-style hex color code corresponding to the obsolescence of the dependency
     #
     def color
+      red = "fb0e0e"
+      
+      if (dependency.cves.map(&:score).compact.max || 0) >= 7
+        return red
+      end
+      
       case dependency.obsolescence
       when :mild then "dde418"
       when :moderate then "f9b733"
-      when :severe then "fb0e0e"
+      when :severe then red
       else "4dda1b"
       end
     end
