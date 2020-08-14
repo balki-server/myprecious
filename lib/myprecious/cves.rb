@@ -1,11 +1,17 @@
 require 'date'
+require 'digest'
 require 'json'
+require 'myprecious/data_caches'
 require 'rest-client'
 require 'set'
 
 module MyPrecious
   module CVEs
+    extend DataCaching
+    
     MIN_GAP_SECONDS = 5
+    
+    CVE_DATA_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / "cve-data")
     
     def self.last_query_time
       @last_query_time ||= DateTime.now - 1
@@ -21,21 +27,24 @@ module MyPrecious
     # the versions of the named package in which you are interested
     #
     def self.get_for(package_name, version='*')
-      # Use last_query_time to sleep if necessary
-      wait_time = MIN_GAP_SECONDS - (DateTime.now - last_query_time) * 24 * 3600
-      if wait_time > 0
-        sleep(wait_time)
-      end
-      
-      response = RestClient.get(
-        "https://services.nvd.nist.gov/rest/json/cves/1.0",
-        {params: {
-          cpeMatchString: "cpe:2.3:a:*:#{package_name.downcase}:#{version}:*:*:*:*:*:*:*",
-        }}
+      nvd_url = URI("https://services.nvd.nist.gov/rest/json/cves/1.0")
+      nvd_url.query = URI.encode_www_form(
+        cpeMatchString: "cpe:2.3:a:*:#{package_name.downcase}:#{version}:*:*:*:*:*:*:*",
       )
-      queried!
       
-      cve_data = JSON.parse(response.body)
+      cache = CVE_DATA_CACHE_DIR / "#{Digest::SHA256.hexdigest(nvd_url.to_s)}.json"
+      cve_data = apply_cache(cache) do
+        # Use last_query_time to sleep if necessary
+        wait_time = MIN_GAP_SECONDS - (DateTime.now - last_query_time) * 24 * 3600
+        if wait_time > 0
+          sleep(wait_time)
+        end
+        
+        response = RestClient.get(nvd_url.to_s)
+        queried!
+        
+        JSON.parse(response.body)
+      end
       
       begin
         return cve_data['result']['CVE_Items'].map do |e|
