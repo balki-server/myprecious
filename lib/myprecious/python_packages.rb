@@ -266,6 +266,10 @@ module MyPrecious
       return info['project_url']
     end
     
+    def release_history_url
+      "https://pypi.org/project/#{name}/#history"
+    end
+    
     def days_between_current_and_recommended
       v, cv_rel = versions_with_release.find do |v, r|
         case 
