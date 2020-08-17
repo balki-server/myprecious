@@ -1,4 +1,5 @@
 require 'gems'
+require 'myprecious/cves'
 require 'myprecious/data_caches'
 require 'pathname'
 
@@ -199,6 +200,12 @@ module MyPrecious
         LicenseDescription.new(current_licenses.join(' or ')).tap do |desc|
           desc.update_info = "rec'd ver.: #{rcmdd_licenses.join(' or ')}"
         end
+      end
+    end
+    
+    def cves
+      CVEs.get_for(name, current_version && current_version.to_s).map do |cve, appl|
+        cve
       end
     end
     

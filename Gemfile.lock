@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    myprecious (0.0.8)
+    myprecious (0.1.2)
       gems (~> 1.0, >= 1.0.0)
       git (~> 1.5, >= 1.5.0)
       parslet (~> 2.0)

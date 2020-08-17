@@ -1,5 +1,6 @@
 require 'json'
 require 'myprecious'
+require 'myprecious/cves'
 require 'myprecious/data_caches'
 require 'open-uri'
 require 'open3'
@@ -258,6 +259,15 @@ module MyPrecious
     def license
       # TODO: Implement better, showing difference between current and recommended
       LicenseDescription.new(get_package_info['info']['license'])
+    end
+    
+    def cves
+      resolve_name!
+      resolve_version!
+      
+      CVEs.get_for(name, current_version).map do |cve, applicability|
+        cve
+      end
     end
     
     def changelog

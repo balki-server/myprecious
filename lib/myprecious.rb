@@ -38,7 +38,7 @@ module MyPrecious
     
     parser.on(
       '--[no-]cache',
-      "Control caching of gem information"
+      "Control caching of dependency information"
     ) {|v| MyPrecious.caching_disabled = v}
   end
   
@@ -280,6 +280,7 @@ module MyPrecious
       when :license then 'License Type'
       when :changelog then 'Change Log'
       when :obsolescence then 'How Bad'
+      when :cves then 'CVEs'
       else
         warn("'#{attr}' column does not have a mapped name")
         attr
@@ -331,7 +332,7 @@ module MyPrecious
   # to some extent like frozen Array instances.
   #
   class ColumnOrder
-    DEFAULT = %i[name current_version age latest_version latest_released recommended_version license changelog].freeze
+    DEFAULT = %i[name current_version age latest_version latest_released recommended_version cves license changelog].freeze
     COLUMN_FROM_TEXT_NAME = {
       'gem' => :name,
       'package' => :name,
@@ -344,6 +345,7 @@ module MyPrecious
       'license type' => :license,
       /change ?log/ => :changelog,
       'recommended version' => :recommended_version,
+      'cves' => :cves,
     }
     
     def initialize
@@ -422,6 +424,8 @@ module MyPrecious
   # and returns enhanced Markdown for selected columns (e.g. +name+).
   #
   class MarkdownAdapter
+    QS_VALUE_UNSAFE = /#{URI::UNSAFE}|[&=]/
+    
     def initialize(dep)
       super()
       @dependency = dep
@@ -456,7 +460,13 @@ module MyPrecious
             ""
           end
         end
-        "**#{recommended_version}**#{span_comment}"
+        cve_url = URI('https://nvd.nist.gov/products/cpe/search/results')
+        cve_url.query = [
+          ['keyword', "cpe:2.3:a:*:#{dependency.name.downcase}:#{recommended_version}"],
+        ].map do |name, value|
+          [URI.escape(name), URI.escape(value, QS_VALUE_UNSAFE)].join('=')
+        end.join('&')
+        "**#{recommended_version}**#{span_comment} ([current CVEs](#{cve_url}))"
       else
         recommended_version
       end
@@ -498,6 +508,29 @@ module MyPrecious
       return base_val
     end
     
+    ##
+    # Render links to NIST's NVD
+    #
+    NVD_CVE_URL_TEMPLATE = "https://nvd.nist.gov/vuln/detail/%s"
+    def cves
+      dependency.cves.map do |cve|
+        link_text_parts = [cve]
+        addnl_info_parts = []
+        begin
+          addnl_info_parts << cve.vendors.to_a.join(',') unless cve.vendors.empty?
+        rescue StandardError
+        end
+        begin
+          addnl_info_parts << cve.score.to_s if cve.score
+        rescue StandardError
+        end
+        unless addnl_info_parts.empty?
+          link_text_parts << "(#{addnl_info_parts.join(' - ')})"
+        end
+        "[#{link_text_parts.join(' ')}](#{NVD_CVE_URL_TEMPLATE % cve})"
+      end.join(', ')
+    end
+    
     def obsolescence
       color_swatch
     rescue StandardError
@@ -508,10 +541,16 @@ module MyPrecious
     # Get a CSS-style hex color code corresponding to the obsolescence of the dependency
     #
     def color
+      red = "fb0e0e"
+      
+      if (dependency.cves.map(&:score).compact.max || 0) >= 7
+        return red
+      end
+      
       case dependency.obsolescence
       when :mild then "dde418"
       when :moderate then "f9b733"
-      when :severe then "fb0e0e"
+      when :severe then red
       else "4dda1b"
       end
     end
