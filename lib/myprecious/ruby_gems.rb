@@ -221,6 +221,16 @@ module MyPrecious
       changelogs[0]
     end
     
+    def release_history_url
+      "https://rubygems.org/gems/#{name}/versions" if (
+        begin
+          get_gems_versions
+        rescue StandardError
+          nil
+        end
+      )
+    end
+    
     def days_between_current_and_recommended
       v, cv_rel = versions_with_release.find {|v, r| v == current_version} || []
       v, rv_rel = versions_with_release.find {|v, r| v == recommended_version} || []

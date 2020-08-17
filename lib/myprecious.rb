@@ -447,6 +447,23 @@ module MyPrecious
     end
     
     ##
+    # Decorate the latest version as a link to the release history
+    #
+    def latest_version
+      release_history_url = begin
+        dependency.release_history_url
+      rescue StandardError
+        nil
+      end
+      
+      if release_history_url
+        "[#{dependency.latest_version}](#{release_history_url})"
+      else
+        dependency.latest_version
+      end
+    end
+    
+    ##
     # Include information about temporal difference between current and
     # recommended versions
     #
