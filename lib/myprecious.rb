@@ -277,7 +277,7 @@ module MyPrecious
     def common_col_title(attr)
       case attr
       when :current_version then 'Our Version'
-      when :age then 'Age (in days)'
+      when :age then 'Age (days)'
       when :latest_version then 'Latest Version'
       when :latest_released then 'Date Available'
       when :recommended_version then 'Recommended Version'
@@ -345,7 +345,7 @@ module MyPrecious
       'how bad' => :obsolescence,
       'latest version' => :latest_version,
       'date available' => :latest_released,
-      'age (in days)' => :age,
+      'age (days)' => :age,
       'license type' => :license,
       /change ?log/ => :changelog,
       'recommended version' => :recommended_version,

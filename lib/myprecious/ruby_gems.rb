@@ -1,3 +1,4 @@
+require 'date'
 require 'gems'
 require 'myprecious/cves'
 require 'myprecious/data_caches'
@@ -157,7 +158,7 @@ module MyPrecious
     
     def latest_released
       return nil if versions_with_release.empty?
-      versions_with_release[0][1]
+      Date.parse(versions_with_release[0][1].to_s).to_s
     end
     
     ##

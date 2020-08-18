@@ -1,3 +1,4 @@
+require 'date'
 require 'json'
 require 'myprecious'
 require 'myprecious/cves'
@@ -213,7 +214,7 @@ module MyPrecious
     end
     
     def latest_released
-      versions_with_release[0][1]
+      Date.parse(versions_with_release[0][1].to_s).to_s      
     end
     
     ##
