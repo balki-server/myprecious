@@ -535,7 +535,7 @@ module MyPrecious
       rescue NoMethodError
         base_val
       else
-        "#{base_val}<br/>(#{update_info})"
+        update_info.to_s.empty? ? base_val : "#{base_val}<br/>(#{update_info})"
       end
     end
     
