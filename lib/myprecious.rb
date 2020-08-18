@@ -13,6 +13,7 @@ module MyPrecious
   ONE_DAY = 60 * 60 * 24
 end
 require 'myprecious/data_caches'
+require 'myprecious/cves'
 
 module MyPrecious
   extend Rake::DSL
@@ -38,6 +39,7 @@ module MyPrecious
       fpath = Pathname(fpath)
       parser.invalid_args!("#{fpath} does not exist.") unless fpath.exist?
       args.target = fpath
+      CVEs.config_dir = fpath
     end
     
     parser.on(
