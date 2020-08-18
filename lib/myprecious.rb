@@ -20,6 +20,10 @@ module MyPrecious
   Program = Rake::ToolkitProgram
   Program.title = "myprecious Dependecy Reporting Tool"
   
+  def self.tracing_errors?
+    !ENV['TRACE_ERRORS'].to_s.empty?
+  end
+  
   def self.common_program_args(parser, args)
     parser.on(
       '-o', '--out FILE',
@@ -432,24 +436,55 @@ module MyPrecious
     end
     attr_reader :dependency
     
+    def self.embellish(attr_name, &blk)
+      define_method(attr_name) do
+        value = begin
+          dependency.send(attr_name)
+        rescue NoMethodError
+          raise
+        rescue StandardError
+          return "(error)"
+        end
+        
+        begin
+          instance_exec(value, &blk)
+        rescue StandardError => ex
+          err_key = [ex.backtrace[0], ex.to_s]
+          unless (@errors ||= Set.new).include?(err_key)
+            @errors << err_key
+            if MyPrecious.tracing_errors?
+              $stderr.puts("Traceback (most recent call last):")
+              ex.backtrace[1..-1].reverse.each_with_index do |loc, i|
+                $stderr.puts("#{(i + 1).to_s.rjust(8)}: #{loc}")
+              end
+              $stderr.puts("#{ex.backtrace[0]}: #{ex} (#{ex.class} while computing #{attr_name})")
+            else
+              $stderr.puts("#{ex} (while computing #{attr_name})")
+            end
+          end
+          value
+        end
+      end
+    end
+    
     ##
     # Generate Markdown linking the +name+ to the homepage for the dependency
     #
-    def name
+    embellish(:name) do |base_val|
       cswatch = begin
         color_swatch + ' '
       rescue StandardError
         ''
       end
-      "#{cswatch}[#{dependency.name}](#{dependency.homepage_uri})"
-    rescue StandardError
-      dependency.name
+      "#{cswatch}[#{base_val}](#{dependency.homepage_uri})"
+    rescue Gems::NotFound
+      base_val
     end
     
     ##
     # Decorate the latest version as a link to the release history
     #
-    def latest_version
+    embellish(:latest_version) do |base_val|
       release_history_url = begin
         dependency.release_history_url
       rescue StandardError
@@ -457,9 +492,9 @@ module MyPrecious
       end
       
       if release_history_url
-        "[#{dependency.latest_version}](#{release_history_url})"
+        "[#{base_val}](#{release_history_url})"
       else
-        dependency.latest_version
+        base_val
       end
     end
     
@@ -467,70 +502,64 @@ module MyPrecious
     # Include information about temporal difference between current and
     # recommended versions
     #
-    def recommended_version
-      recommended_version = dependency.recommended_version
-      if dependency.current_version < recommended_version
-        span_comment = begin
-          if days_newer = dependency.days_between_current_and_recommended
-            " -- #{days_newer} days newer"
-          else
-            ""
-          end
-        end
-        cve_url = URI('https://nvd.nist.gov/products/cpe/search/results')
-        cve_url.query = [
-          ['keyword', "cpe:2.3:a:*:#{dependency.name.downcase}:#{recommended_version}"],
-        ].map do |name, value|
-          [URI.escape(name), URI.escape(value, QS_VALUE_UNSAFE)].join('=')
-        end.join('&')
-        "**#{recommended_version}**#{span_comment} ([current CVEs](#{cve_url}))"
-      else
-        recommended_version
+    embellish(:recommended_version) do |recced_ver|
+      if recced_ver.kind_of?(String)
+        recced_ver = Gem::Version.new(recced_ver)
       end
-    rescue StandardError
-      recommended_version || "(error)"
+      next recced_ver if dependency.current_version.nil? || dependency.current_version >= recced_ver
+      
+      span_comment = begin
+        if days_newer = dependency.days_between_current_and_recommended
+          " -- #{days_newer} days newer"
+        else
+          ""
+        end
+      end
+      
+      cve_url = URI('https://nvd.nist.gov/products/cpe/search/results')
+      cve_url.query = [
+        ['keyword', "cpe:2.3:a:*:#{dependency.name.downcase}:#{recced_ver}"],
+      ].map do |name, value|
+        [URI.escape(name), URI.escape(value, QS_VALUE_UNSAFE)].join('=')
+      end.join('&')
+      
+      "**#{recced_ver}**#{span_comment} ([current CVEs](#{cve_url}))"
     end
     
     ##
     # Include update info in the license column
     #
-    def license
-      value = dependency.license
-      if value.update_info
-        "#{value}<br/>(#{value.update_info})"
+    embellish(:license) do |base_val|
+      begin
+        update_info = base_val.update_info
+      rescue NoMethodError
+        base_val
       else
-        value
+        "#{base_val}<br/>(#{update_info})"
       end
-    rescue StandardError
-      "(error)"
     end
     
     ##
     # Render short links for http: or https: changelog URLs
     #
-    def changelog
-      base_val = begin
-        dependency.changelog
-      rescue StandardError
-        return "(error)"
-      end
-      
+    embellish(:changelog) do |base_val|
       begin
         uri = URI.parse(base_val)
         if ['http', 'https'].include?(uri.scheme)
-          return "[on #{uri.hostname}](#{base_val})"
+          next "[on #{uri.hostname}](#{base_val})"
         end
       rescue StandardError
       end
-      return base_val
+      
+      base_val
     end
     
     ##
     # Render links to NIST's NVD
     #
     NVD_CVE_URL_TEMPLATE = "https://nvd.nist.gov/vuln/detail/%s"
-    def cves
-      dependency.cves.map do |cve|
+    embellish(:cves) do |base_val|
+      base_val.map do |cve|
         link_text_parts = [cve]
         addnl_info_parts = []
         begin

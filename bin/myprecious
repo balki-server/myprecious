@@ -4,5 +4,5 @@ require 'rubygems'
 require 'myprecious'
 
 MyPrecious::Program.run(
-  on_error: (:exit_program! if ENV['TRACE_ERRORS'].to_s.empty?)
+  on_error: (:exit_program! unless MyPrecious.tracing_errors?)
 )
