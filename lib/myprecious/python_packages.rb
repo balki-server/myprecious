@@ -266,7 +266,7 @@ module MyPrecious
       resolve_name!
       resolve_version!
       
-      CVEs.get_for(name, current_version).map do |cve, applicability|
+      CVEs.get_for(name, current_version.to_s).map do |cve, applicability|
         cve
       end
     end
