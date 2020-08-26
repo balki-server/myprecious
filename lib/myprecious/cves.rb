@@ -70,7 +70,7 @@ module MyPrecious
           [cve, applicability]
         end.reject {|cve, a| a.respond_to?(:applies_to?) && !a.applies_to?(version)}
       rescue StandardError => e
-        $stderr.puts "[WARN] #{e}\n\n#{response.body}\n\n"
+        $stderr.puts "[WARN] #{e}\n\n#{JSON.dump(cve_data)}\n\n"
         []
       end
     end
