@@ -2,6 +2,8 @@ require 'date'
 require 'digest'
 require 'json'
 require 'myprecious/data_caches'
+require 'open3'
+require 'pathname'
 require 'rest-client'
 require 'set'
 
@@ -10,8 +12,17 @@ module MyPrecious
     extend DataCaching
     
     MIN_GAP_SECONDS = 5
+    CONFIG_FILE = '.myprecious-cves.rb'
     
     CVE_DATA_CACHE_DIR = MyPrecious.data_cache(DATA_DIR / "cve-data")
+    
+    class <<self
+      attr_reader :config_dir
+      
+      def config_dir=(val)
+        @config_dir = Pathname(val)
+      end
+    end
     
     def self.last_query_time
       @last_query_time ||= DateTime.now - 1
@@ -57,11 +68,36 @@ module MyPrecious
           )
           
           [cve, applicability]
-        end
+        end.reject {|cve, a| a.respond_to?(:applies_to?) && !a.applies_to?(version)}
       rescue StandardError => e
-        $stderr.puts "[WARN] #{e}\n\n#{response.body}\n\n"
+        $stderr.puts "[WARN] #{e}\n\n#{JSON.dump(cve_data)}\n\n"
         []
       end
+    end
+    
+    def self.config
+      if !@config && config_dir
+        if (config_path = config_dir / CONFIG_FILE).exist?
+          @config = begin
+            config_prog_output, status = Open3.capture2(RbConfig.ruby, config_path.to_s)
+            if status.success?
+              JSON.parse(config_prog_output)
+            else
+              $stderr.puts "#{config_path} did not exit cleanly (code ${status.exitstatus})"
+              {}
+            end
+          rescue StandardError
+          end
+          
+          unless @config.kind_of?(Hash)
+            $stderr.puts "#{config_path} did not output a JSON configuration"
+            @config = {}
+          end
+        else
+          @config = {}
+        end
+      end
+      @config
     end
     
     def self.objectify_configurations(package_name, configs)
@@ -141,7 +177,6 @@ module MyPrecious
       def version_matches_node?(version, node)
         test = (node['operator'] == 'AND') ? :all? : :any?
         if node['children']
-          return node['children']
           return node['children'].send(test) {|child| version_matches_node?(version, child)}
         end
         
@@ -153,7 +188,12 @@ module MyPrecious
       def cpe_entry_indicates_vulnerable_version?(version, pattern)
         return false unless pattern['vulnerable']
         
-        cpe_version, cpe_update = pattern['cpe23Uri'].split(':')[5,2]
+        cpe_vendor, cpe_product, cpe_version, cpe_update = pattern['cpe23Uri'].split(':')[3,4]
+        return false if (CVEs.config['blockedProducts'] ||= []).include?([cpe_vendor, cpe_product].join(':'))
+        return false if cpe_product != @package
+        if version == '*'
+          return true
+        end
         return false unless [nil, '*', '-'].include?(cpe_update) # We'll ignore prerelease versions
         if cpe_version != '*' && cpe_version == version
           return true
