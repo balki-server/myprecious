@@ -1,7 +1,7 @@
 require 'rake'
 Gem::Specification.new do |s|
   s.name        = 'myprecious'
-  s.version     = '0.1.2'
+  s.version     = '0.2.0'
   s.date        = '2020-04-17'
   s.summary     = "Your precious dependencies!"
   s.description = "A simple, markdown generated with information about your gems and python packages"
