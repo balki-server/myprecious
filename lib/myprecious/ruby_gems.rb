@@ -35,11 +35,11 @@ module MyPrecious
     # used by the project.  Each gem name will appear in only one +:current+
     # iteration, but may occur in multiple +:reqs+ iterations.
     # 
-    def self.each_gem_used(fpath)
+    def self.each_gem_used(fpath, gemfile: 'Gemfile')
       return enum_for(:each_gem_used, fpath) unless block_given?
       
-      gemlock = Pathname(fpath).join('Gemfile.lock')
-      raise "No Gemfile.lock in #{fpath}" unless gemlock.exist?
+      gemlock = Pathname(fpath).join(gemfile + '.lock')
+      raise "No #{gemfile}.lock in #{fpath}" unless gemlock.exist?
       
       section = nil
       gemlock.each_line do |l|
@@ -66,9 +66,9 @@ module MyPrecious
     # #current_version values and meaningful information in #version_reqs,
     # as indicated in the Gemfile.lock for +fpath+.
     #
-    def self.accum_gem_lock_info(fpath)
+    def self.accum_gem_lock_info(fpath, **opts)
       {}.tap do |gems|
-        each_gem_used(fpath) do |entry_type, name, verreq|
+        each_gem_used(fpath, **opts) do |entry_type, name, verreq|
           g = (gems[name] ||= RubyGemInfo.new(name))
           
           case entry_type
