@@ -97,7 +97,7 @@ module MyPrecious
           @config = {}
         end
       end
-      @config
+      @config ||= {}
     end
     
     def self.objectify_configurations(package_name, configs)

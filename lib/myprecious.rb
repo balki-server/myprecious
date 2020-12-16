@@ -519,11 +519,9 @@ module MyPrecious
       end
       
       cve_url = URI('https://nvd.nist.gov/products/cpe/search/results')
-      cve_url.query = [
-        ['keyword', "cpe:2.3:a:*:#{dependency.name.downcase}:#{recced_ver}"],
-      ].map do |name, value|
-        [URI.escape(name), URI.escape(value, QS_VALUE_UNSAFE)].join('=')
-      end.join('&')
+      cve_url.query = URI.encode_www_form(
+        keyword: "cpe:2.3:a:*:#{dependency.name.downcase}:#{recced_ver}",
+      )
       
       "**#{recced_ver}**#{span_comment} ([current CVEs](#{cve_url}))"
     end
