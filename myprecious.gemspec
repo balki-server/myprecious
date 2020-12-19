@@ -2,7 +2,7 @@ require 'rake'
 Gem::Specification.new do |s|
   s.name        = 'myprecious'
   s.version     = '0.2.0'
-  s.date        = '2020-04-17'
+  s.date        = '2020-12-17'
   s.summary     = "Your precious dependencies!"
   s.description = "A simple, markdown generated with information about your gems and python packages"
   s.authors     = ["Balki Kodarapu"]
@@ -15,12 +15,12 @@ Gem::Specification.new do |s|
   s.add_runtime_dependency 'rest-client', '~> 2.0.2', '>= 2.0'
   s.add_runtime_dependency 'parslet', '~> 2.0'
   s.add_runtime_dependency 'rubyzip', '~> 2.3'
-  
+
   s.add_development_dependency "bundler", "~> 1.13"
   s.add_development_dependency "pry", "~> 0.13"
   s.add_development_dependency "rb-readline", "~> 0.5"
   s.add_development_dependency "byebug"
-  
+
   s.homepage    =
     'http://rubygems.org/gems/myprecious'
   s.license       = 'MIT'
