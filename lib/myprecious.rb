@@ -607,7 +607,7 @@ module MyPrecious
     # Sourced from: https://stackoverflow.com/a/41247934
     #
     def color_swatch
-      "![##{color}](https://placehold.it/15/#{color}/000000?text=+)"
+      "![##{color}](https://placehold.co/15/#{color}/000000?text=+)"
     end
     
     ##
