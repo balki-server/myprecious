@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    myprecious (0.1.2)
+    myprecious (0.2.1)
       gems (~> 1.0, >= 1.0.0)
       git (~> 1.5, >= 1.5.0)
       parslet (~> 2.0)
@@ -19,20 +19,20 @@ GEM
     domain_name (0.5.20190701)
       unf (>= 0.0.5, < 1.0.0)
     gems (1.2.0)
-    git (1.6.0)
+    git (1.11.0)
       rchardet (~> 1.8)
-    http-cookie (1.0.3)
+    http-cookie (1.0.4)
       domain_name (~> 0.5)
     method_source (1.0.0)
-    mime-types (3.3.1)
+    mime-types (3.4.1)
       mime-types-data (~> 3.2015)
-    mime-types-data (3.2019.1009)
+    mime-types-data (3.2022.0105)
     netrc (0.11.0)
     parslet (2.0.0)
     pry (0.13.0)
       coderay (~> 1.1)
       method_source (~> 1.0)
-    rake (13.0.1)
+    rake (13.0.6)
     rake-toolkit_program (0.1.2)
       colorize (~> 0.8)
       dedent (~> 1.0)
@@ -43,16 +43,16 @@ GEM
       http-cookie (>= 1.0.2, < 2.0)
       mime-types (>= 1.16, < 4.0)
       netrc (~> 0.8)
-    rubyzip (2.3.0)
+    rubyzip (2.3.2)
     unf (0.1.4)
       unf_ext
-    unf_ext (0.0.7.7)
+    unf_ext (0.0.8.1)
 
 PLATFORMS
   ruby
 
 DEPENDENCIES
-  bundler (~> 1.13)
+  bundler (>= 2.2.10)
   byebug
   myprecious!
   pry (~> 0.13)
