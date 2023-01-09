@@ -12,6 +12,8 @@ PATH
 GEM
   remote: https://rubygems.org/
   specs:
+    addressable (2.8.1)
+      public_suffix (>= 2.0.2, < 6.0)
     byebug (11.1.1)
     coderay (1.1.2)
     colorize (0.8.1)
@@ -19,7 +21,8 @@ GEM
     domain_name (0.5.20190701)
       unf (>= 0.0.5, < 1.0.0)
     gems (1.2.0)
-    git (1.11.0)
+    git (1.13.0)
+      addressable (~> 2.8)
       rchardet (~> 1.8)
     http-cookie (1.0.4)
       domain_name (~> 0.5)
@@ -32,6 +35,7 @@ GEM
     pry (0.13.0)
       coderay (~> 1.1)
       method_source (~> 1.0)
+    public_suffix (5.0.1)
     rake (13.0.6)
     rake-toolkit_program (0.1.2)
       colorize (~> 0.8)
